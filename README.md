@@ -146,6 +146,8 @@ lore/a.md  19         draft
 lore/b.md  15
 ```
 
+A `.yio` plugin can draw more than a table: boxes, rows of them, trees, bars, and coloured text, which is enough to give a directory a small panel of its own above its command list. The built-ins are under "Layout and style" in the reference.
+
 Plugins are told the command line: a bash plugin as `"$@"`, a `.yio` plugin through `(args)`. This repository has a working one. In [docs/](docs/yio.md), a plugin answers the `search` command by drawing the scripting API as a table, read out of the reference itself:
 
 ```bash

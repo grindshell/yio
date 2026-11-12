@@ -21,6 +21,9 @@ pub enum Value {
     Column(Rc<Column>),
     /// A table for yio to draw: what `col` makes.
     Table(Rc<[Rc<Column>]>),
+    /// Something else for yio to draw, built out of other values: what
+    /// `box`, `row`, `style`, and the like make.
+    View(Rc<View>),
     Fn(Rc<Function>),
     Native(&'static Builtin),
 }
@@ -29,6 +32,127 @@ pub enum Value {
 pub struct Column {
     pub header: Rc<str>,
     pub cells: Rc<[Value]>,
+}
+
+/// The kinds of thing a script can ask to have drawn, besides a table.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ViewKind {
+    /// A value with its text in a style: bold, a colour.
+    Style,
+    /// A value with a border around it, and maybe a title.
+    Box,
+    /// Values side by side.
+    Row,
+    /// A line as wide as what it sits among.
+    Rule,
+    /// How much of a whole is done, as a bar.
+    Bar,
+    /// A label with what is under it drawn as branches.
+    Tree,
+    /// Labels, each with a value beside it.
+    Fields,
+}
+
+impl ViewKind {
+    pub const ALL: [ViewKind; 7] = [
+        ViewKind::Style,
+        ViewKind::Box,
+        ViewKind::Row,
+        ViewKind::Rule,
+        ViewKind::Bar,
+        ViewKind::Tree,
+        ViewKind::Fields,
+    ];
+
+    /// The built-in that makes it.
+    pub fn name(self) -> &'static str {
+        match self {
+            ViewKind::Style => "style",
+            ViewKind::Box => "box",
+            ViewKind::Row => "row",
+            ViewKind::Rule => "rule",
+            ViewKind::Bar => "bar",
+            ViewKind::Tree => "tree",
+            ViewKind::Fields => "fields",
+        }
+    }
+}
+
+/// The widest a `bar` may be asked to be.
+pub const MAX_BAR_WIDTH: i64 = 200;
+
+/// One thing to draw. `parts` are the arguments its built-in was given,
+/// which `View::new` has checked, so that drawing can rely on their shape.
+#[derive(PartialEq)]
+pub struct View {
+    pub kind: ViewKind,
+    pub parts: Rc<[Value]>,
+}
+
+impl View {
+    /// Checks the arguments of the built-in for `kind`. The same check runs
+    /// on a view read back from the cache, so a damaged one is not drawn.
+    pub fn new(kind: ViewKind, parts: Vec<Value>) -> Result<View, String> {
+        let name = kind.name();
+        let count = |allowed: &str| {
+            format!("`{name}` takes {allowed} but was given {}", parts.len())
+        };
+        let wrong = |wanted: &str, found: &Value| {
+            format!("`{name}` needs {wanted}, but was given {}", found.type_name())
+        };
+        match (kind, parts.as_slice()) {
+            (ViewKind::Style, [_, names @ ..]) if !names.is_empty() => {
+                for style in names {
+                    match style {
+                        Value::Str(style) if super::render::is_style(style) => {}
+                        Value::Str(style) => {
+                            let known = super::render::STYLES.join("`, `");
+                            return Err(format!(
+                                "`style` does not know the style `{style}`; the styles are `{known}`"
+                            ));
+                        }
+                        other => return Err(wrong("the name of a style", other)),
+                    }
+                }
+            }
+            (ViewKind::Style, _) => return Err(count("a value and at least 1 style")),
+            (ViewKind::Box, [_]) | (ViewKind::Box, [_, Value::Str(_)]) => {}
+            (ViewKind::Box, [_, title]) => return Err(wrong("a string for its title", title)),
+            (ViewKind::Box, _) => return Err(count("1 or 2 arguments")),
+            (ViewKind::Row, []) => return Err(count("at least 1 argument")),
+            (ViewKind::Row, _) => {}
+            (ViewKind::Rule, []) => {}
+            (ViewKind::Rule, _) => return Err(count("0 arguments")),
+            (ViewKind::Bar, [part, whole, width @ ..]) if width.len() <= 1 => {
+                let integer = |value: &Value| match value {
+                    Value::Int(n) => Ok(*n),
+                    other => Err(wrong("an integer", other)),
+                };
+                integer(part)?;
+                if integer(whole)? <= 0 {
+                    return Err("`bar` needs a whole that is more than 0".to_string());
+                }
+                if let [width] = width
+                    && !(1..=MAX_BAR_WIDTH).contains(&integer(width)?)
+                {
+                    return Err(format!("`bar` needs a width from 1 to {MAX_BAR_WIDTH}"));
+                }
+            }
+            (ViewKind::Bar, _) => return Err(count("2 or 3 arguments")),
+            (ViewKind::Tree, [_, Value::List(_)]) => {}
+            (ViewKind::Tree, [_, children]) => {
+                return Err(wrong("a list of what is under the label", children));
+            }
+            (ViewKind::Tree, _) => return Err(count("2 arguments")),
+            (ViewKind::Fields, [Value::List(_), Value::List(_)]) => {}
+            (ViewKind::Fields, [labels, values]) => {
+                let other = if matches!(labels, Value::List(_)) { values } else { labels };
+                return Err(wrong("a list of labels and a list of values", other));
+            }
+            (ViewKind::Fields, _) => return Err(count("2 arguments")),
+        }
+        Ok(View { kind, parts: Rc::from(parts) })
+    }
 }
 
 /// A function written in a script.
@@ -83,6 +207,15 @@ impl Value {
             Value::List(_) => "a list",
             Value::Column(_) => "a column",
             Value::Table(_) => "a table",
+            Value::View(view) => match view.kind {
+                ViewKind::Style => "styled text",
+                ViewKind::Box => "a box",
+                ViewKind::Row => "a row",
+                ViewKind::Rule => "a rule",
+                ViewKind::Bar => "a bar",
+                ViewKind::Tree => "a tree",
+                ViewKind::Fields => "fields",
+            },
             Value::Fn(_) | Value::Native(_) => "a function",
         }
     }
@@ -99,6 +232,7 @@ impl PartialEq for Value {
             (Value::List(a), Value::List(b)) => a == b,
             (Value::Column(a), Value::Column(b)) => a == b,
             (Value::Table(a), Value::Table(b)) => a == b,
+            (Value::View(a), Value::View(b)) => a == b,
             (Value::Fn(a), Value::Fn(b)) => Rc::ptr_eq(a, b),
             (Value::Native(a), Value::Native(b)) => std::ptr::eq(*a, *b),
             _ => false,
@@ -135,6 +269,13 @@ impl fmt::Display for Value {
                 for column in columns.iter() {
                     f.write_str(" ")?;
                     write_column(f, column)?;
+                }
+                f.write_str(")")
+            }
+            Value::View(view) => {
+                write!(f, "({}", view.kind.name())?;
+                for part in view.parts.iter() {
+                    write!(f, " {part}")?;
                 }
                 f.write_str(")")
             }

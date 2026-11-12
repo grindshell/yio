@@ -7,7 +7,7 @@
 
 use std::rc::Rc;
 
-use super::value::{Column, Value};
+use super::value::{Column, Value, View, ViewKind};
 use crate::bytes::{Reader, put_bytes, put_len, put_str, put_u8, put_u64};
 
 const BOOL: u8 = 1;
@@ -17,6 +17,7 @@ const BYTES: u8 = 4;
 const LIST: u8 = 5;
 const COLUMN: u8 = 6;
 const TABLE: u8 = 7;
+const VIEW: u8 = 8;
 
 /// How deeply values may nest and still be stored. A value nested further
 /// is simply not cached, and its script runs every time.
@@ -66,6 +67,12 @@ fn put(out: &mut Vec<u8>, value: &Value, depth: usize) -> Result<(), String> {
                 put_column(out, column, depth)?;
             }
         }
+        Value::View(view) => {
+            put_u8(out, VIEW);
+            let kind = ViewKind::ALL.iter().position(|kind| *kind == view.kind);
+            put_u8(out, kind.expect("every kind is listed") as u8);
+            put_items(out, &view.parts, depth)?;
+        }
         Value::Fn(_) | Value::Native(_) => {
             return Err("a function cannot be stored".to_string());
         }
@@ -110,6 +117,15 @@ fn take(reader: &mut Reader, depth: usize) -> Result<Value, String> {
                 columns.push(take_column(reader, depth)?);
             }
             Value::Table(Rc::from(columns))
+        }
+        VIEW => {
+            let kind = ViewKind::ALL.get(usize::from(reader.u8()?)).copied();
+            let kind = kind.ok_or("cache has an unknown kind of view")?;
+            let parts = take_items(reader, depth)?.to_vec();
+            // The same check the built-in makes, so that what is drawn
+            // later has the shape drawing expects.
+            let view = View::new(kind, parts).map_err(|_| "cache has a malformed view")?;
+            Value::View(Rc::new(view))
         }
         _ => return Err("cache has an unknown kind of value".to_string()),
     })
@@ -167,10 +183,33 @@ mod tests {
             "(col-def \"Header\" (list 1 \"x\" ()))",
             "(col (col-def \"A\" (list 1 2)) (col-def \"B\" ()))",
             "(list \"title\" (col (col-def \"A\" (list (list 1 2)))))",
+            "(style \"text\" \"bold\" \"red\")",
+            "(box (list \"a\" (rule) (bar 3 10)) \"Title\")",
+            "(row (tree \"docs\" (list \"a.md\")) (fields (list \"Files\") (list 12)) (bar 1 2 30))",
+            "(col (col-def \"Done\" (list (bar 1 2) (style \"ok\" \"green\"))))",
         ] {
             let (original, restored) = round_trip(source);
             assert_eq!(restored.as_ref(), Ok(&original), "{source}");
         }
+    }
+
+    #[test]
+    fn a_stored_view_is_checked_like_a_new_one() {
+        let bar = |whole: i64| {
+            let kind = ViewKind::ALL.iter().position(|kind| *kind == ViewKind::Bar).unwrap();
+            let mut bytes = vec![VIEW, kind as u8];
+            put_len(&mut bytes, 2);
+            for number in [1, whole] {
+                put_u8(&mut bytes, INT);
+                put_u64(&mut bytes, number as u64);
+            }
+            bytes
+        };
+        assert_eq!(decode(&bar(4)).unwrap().to_string(), "(bar 1 4)");
+        // A whole of zero is what `bar` itself refuses, and drawing it
+        // would divide by it.
+        assert_eq!(decode(&bar(0)), Err("cache has a malformed view".to_string()));
+        assert_eq!(decode(&[VIEW, 200, 0, 0, 0, 0]), Err("cache has an unknown kind of view".to_string()));
     }
 
     #[test]

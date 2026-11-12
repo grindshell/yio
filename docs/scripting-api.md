@@ -67,6 +67,7 @@ Whitespace separates tokens and is otherwise ignored. Outside strings, bytes, an
 | Function | `fn`, or a built-in's name | Can be passed and stored, but cannot be a script's result. |
 | Column | `col-def` | |
 | Table | `col` | |
+| Something else to draw | `box`, `row`, `style`, `rule`, `bar`, `tree`, `fields` | See "Layout and style". |
 
 - **Truthiness**: only `false` and `()` are false. `0` and `""` are true.
 - **Nothing changes in place.** `append`, `replace`, and the rest give a new value, so a value handed to a function cannot be altered behind the caller's back.
@@ -199,6 +200,53 @@ These work on the text of a path. Nothing is looked up.
 | `(col-def header cells)` | A column: a header string and a list of cells |
 | `(col column...)` | A table of one or more columns, for `yio` to draw |
 
+### Layout and style
+
+These make values for `yio` to draw, like `col`. They nest freely: a table can sit in a box, boxes in a row, a bar in a table cell.
+
+| Call | Gives |
+| --- | --- |
+| `(style value name...)` | The value with its text in the named styles |
+| `(box value [title])` | The value with a border around it |
+| `(row value...)` | The values side by side |
+| `(rule)` | A line as wide as what it sits among |
+| `(bar part whole [width])` | A bar filled to the share that part is of whole, and the percentage |
+| `(tree label children)` | The label with a list of children drawn under it as branches |
+| `(fields labels values)` | A list of labels, each with its value beside it |
+
+- **Styles** are `bold`, `dim`, `italic`, `underline`, and the colours `red`, `green`, `yellow`, `blue`, `magenta`, `cyan`, `white`, `gray`. A `style` reaches everything inside it. Something inside with a colour of its own keeps it.
+- Styles are shown when the output is a terminal, and left out when it is a file or a pipe, so nothing downstream sees stray codes. Setting `NO_COLOR` turns them off and `CLICOLOR_FORCE=1` turns them on. Layout is the same either way.
+- `row` leaves two spaces between its values and lines them up at the top.
+- `rule` takes its width from the box, the side of a row, or the list it is in. Alone, it is 40 wide.
+- `bar` is 20 wide unless given a width, from 1 to 200. The whole has to be more than 0. A part outside it counts as none or all.
+- A child of a `tree` can be a `tree` itself, which is how branches nest.
+- A value in a table cell or in `fields` stays on one line.
+
+```lisp
+(row
+  (box
+    (fields
+      (list "Notes" "Finished" "Progress")
+      (list 4 2 (bar 2 4 12)))
+    "Lore")
+  (box
+    (tree "lore" (list
+      "dragons.md"
+      (tree "old" (list "first.md"))
+      (style "rivers.md" "yellow")))
+    "Files"))
+```
+
+```
+┌─ Lore ──────────────────────┐  ┌─ Files ────────┐
+│ Notes     4                 │  │ lore           │
+│ Finished  2                 │  │ ├─ dragons.md  │
+│ Progress  ██████░░░░░░  50% │  │ ├─ old         │
+└─────────────────────────────┘  │ │  └─ first.md │
+                                 │ └─ rivers.md   │
+                                 └────────────────┘
+```
+
 ### Numbers and comparison
 
 | Call | Gives |
@@ -227,11 +275,14 @@ These work on the text of a path. Nothing is looked up.
 | A string | The text, on its own line |
 | A table | A row of headers, a rule, then the rows, in columns padded to the widest entry |
 | A column | A table of that one column |
-| A list | Each item in turn, so a script can give a heading, a table, and a note |
+| What `box`, `row`, and the other layout built-ins make | That, as described under "Layout and style" |
+| A list | Each item in turn, one under the other, so a script can give a heading, a table, and a note |
 | An integer, boolean, or bytes | The value as a script would write it |
 | A function | An error |
 
 In a table cell, `()` is blank and line breaks become spaces. Columns of different lengths are padded with blanks. Widths count characters, so wide characters such as CJK can misalign.
+
+Boxes, rules, bars, and trees are drawn with box-drawing and block characters, which a terminal needs a font for. There is no plain-ASCII form of them yet.
 
 ## Errors and limits
 

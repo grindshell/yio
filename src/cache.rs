@@ -36,7 +36,7 @@ use crate::input::{Input, PathKind};
 pub const FILE: &str = ".yio/cache.yio";
 
 /// Bumped whenever the payload layout changes.
-const FORMAT: u8 = 5;
+const FORMAT: u8 = 6;
 const PREFIX: &[u8] = b"(cache #";
 
 /// How deeply commands may nest in a cache file. Real trees stay far below

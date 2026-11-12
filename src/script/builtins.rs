@@ -12,7 +12,7 @@ use std::rc::Rc;
 
 use super::eval::{Interp, count};
 use super::reader::{Error, Pos};
-use super::value::{Builtin, Column, Value};
+use super::value::{Builtin, Column, Value, View, ViewKind};
 use crate::input::{self, PathKind};
 
 /// Finds a built-in by name.
@@ -74,6 +74,14 @@ static BUILTINS: &[Builtin] = &[
     // Tables.
     Builtin { name: "col-def", call: col_def },
     Builtin { name: "col", call: col },
+    // Layout and style. Each makes a value for yio to draw.
+    Builtin { name: "style", call: |_, args, pos| view(ViewKind::Style, args, pos) },
+    Builtin { name: "box", call: |_, args, pos| view(ViewKind::Box, args, pos) },
+    Builtin { name: "row", call: |_, args, pos| view(ViewKind::Row, args, pos) },
+    Builtin { name: "rule", call: |_, args, pos| view(ViewKind::Rule, args, pos) },
+    Builtin { name: "bar", call: |_, args, pos| view(ViewKind::Bar, args, pos) },
+    Builtin { name: "tree", call: |_, args, pos| view(ViewKind::Tree, args, pos) },
+    Builtin { name: "fields", call: |_, args, pos| view(ViewKind::Fields, args, pos) },
 ];
 
 fn error(pos: Pos, message: String) -> Error {
@@ -610,6 +618,16 @@ fn filter(interp: &mut Interp, args: &[Value], pos: Pos) -> Result<Value, Error>
     Ok(Value::list(kept))
 }
 
+/// The drawing built-ins: `style`, `box`, `row`, `rule`, `bar`, `tree`, and
+/// `fields`. Each only checks its arguments and keeps them. Nothing is
+/// drawn until the script has finished.
+fn view(kind: ViewKind, args: &[Value], pos: Pos) -> Result<Value, Error> {
+    match View::new(kind, args.to_vec()) {
+        Ok(view) => Ok(Value::View(Rc::new(view))),
+        Err(message) => Err(error(pos, message)),
+    }
+}
+
 /// `(col-def header cells)`: one column of a table.
 fn col_def(_: &mut Interp, args: &[Value], pos: Pos) -> Result<Value, Error> {
     arity("col-def", args, 2, pos)?;
@@ -755,6 +773,55 @@ mod tests {
             r#"(col (col-def "Name" ("a" "b")) (col-def "Size" (1 2)))"#
         );
         assert_eq!(value(r#"(col-def "Empty" ())"#), r#"(col-def "Empty" ())"#);
+    }
+
+    #[test]
+    fn drawing_built_ins_make_values_that_print_as_they_were_written() {
+        for source in [
+            r#"(style "text" "bold" "red")"#,
+            r#"(box "text")"#,
+            r#"(box (list "a" "b") "Title")"#,
+            r#"(row "a" 2 (box "c"))"#,
+            "(rule)",
+            "(bar 3 10)",
+            "(bar 3 10 40)",
+            r#"(tree "docs" (list "a.md" (tree "lore" ())))"#,
+            r#"(fields (list "Files" "Size") (list 12 "3 KB"))"#,
+        ] {
+            assert_eq!(value(source), source.replace("(list ", "("), "{source}");
+        }
+        // Two made the same way are equal, and they are true like any value.
+        assert_eq!(value(r#"(list (= (box "a") (box "a")) (= (box "a") (box "b")) (not (rule)))"#), "(true false false)");
+    }
+
+    #[test]
+    fn drawing_built_ins_check_their_arguments() {
+        let cases = [
+            (r#"(style "text")"#, "`style` takes a value and at least 1 style but was given 1"),
+            ("(style)", "`style` takes a value and at least 1 style but was given 0"),
+            (r#"(style "text" "loud")"#, "`style` does not know the style `loud`; the styles are `bold`, `dim`, `italic`, `underline`, `red`, `green`, `yellow`, `blue`, `magenta`, `cyan`, `white`, `gray`"),
+            (r#"(style "text" 1)"#, "`style` needs the name of a style, but was given an integer"),
+            ("(box)", "`box` takes 1 or 2 arguments but was given 0"),
+            (r#"(box "a" "b" "c")"#, "`box` takes 1 or 2 arguments but was given 3"),
+            (r#"(box "a" 5)"#, "`box` needs a string for its title, but was given an integer"),
+            ("(row)", "`row` takes at least 1 argument but was given 0"),
+            ("(rule 10)", "`rule` takes 0 arguments but was given 1"),
+            ("(bar 1)", "`bar` takes 2 or 3 arguments but was given 1"),
+            ("(bar 1 2 3 4)", "`bar` takes 2 or 3 arguments but was given 4"),
+            (r#"(bar "1" 2)"#, "`bar` needs an integer, but was given a string"),
+            ("(bar 1 0)", "`bar` needs a whole that is more than 0"),
+            ("(bar 1 -5)", "`bar` needs a whole that is more than 0"),
+            ("(bar 1 2 0)", "`bar` needs a width from 1 to 200"),
+            ("(bar 1 2 201)", "`bar` needs a width from 1 to 200"),
+            (r#"(tree "a")"#, "`tree` takes 2 arguments but was given 1"),
+            (r#"(tree "a" "b")"#, "`tree` needs a list of what is under the label, but was given a string"),
+            (r#"(fields (list "a"))"#, "`fields` takes 2 arguments but was given 1"),
+            (r#"(fields "a" (list 1))"#, "`fields` needs a list of labels and a list of values, but was given a string"),
+            (r#"(fields (list "a") 1)"#, "`fields` needs a list of labels and a list of values, but was given an integer"),
+        ];
+        for (source, expected) in cases {
+            assert_eq!(failure(source), format!("1:1: {expected}"), "{source}");
+        }
     }
 
     #[test]

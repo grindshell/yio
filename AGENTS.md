@@ -28,7 +28,7 @@ A Rust crate (edition 2024) with no dependencies. It loads `yio.md` and the file
 | `src/script/eval.rs` | Evaluates forms: keywords, scopes, functions |
 | `src/script/value.rs` | Script values |
 | `src/script/builtins.rs` | Built-in functions, including the ones that read files and record inputs |
-| `src/script/render.rs` | A script's value as terminal text |
+| `src/script/render.rs` | A script's value as terminal text: tables, boxes, rows, styles |
 | `src/script/encode.rs` | A script's value as bytes, for the cache |
 | `docs/cli-parsing.md` | The parsing and running rules the above implement |
 | `docs/embedding.md` | How one `yio.md` embeds another |

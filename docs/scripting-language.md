@@ -13,6 +13,8 @@ A small Lisp-like language for `.yio/` plugins that show something about a proje
 
 A script evaluates to a value, and `yio` draws that value after the script finishes. The table built-ins therefore build values and print nothing: `(col (col-def "File" names) (col-def "Size" sizes))` evaluates to a table.
 
+The same goes for layout and style. `box`, `row`, `style`, and the rest only check their arguments and keep them; a box is a value like a list is. That is why they nest without any of them knowing about the others, and why a script can build a panel in a function, pass it around, and put it in a row.
+
 This is what makes replay simple. The cache stores the value, and a clean run draws it without evaluating anything. A language with `print` would have to record and replay a stream of output instead.
 
 Functions are the one kind of value with no stored form, so a script whose result contains one is an error.
@@ -68,6 +70,14 @@ Values are reference-counted without locking, so they cannot leave the script's 
 
 Not guarded: a value nested hundreds of thousands deep, built without recursion by wrapping a variable in a new list on every pass of a `map`. Freeing it recurses once per level.
 
+### Drawing
+
+Every value is first laid out as a block: a list of lines, each made of spans of text in one style. A box lays out what it holds and puts a border around those lines; a row lays out each of its values and joins them line by line. Because every kind of value becomes the same thing, any of them can go inside any other.
+
+Widths are measured on the spans, so the codes that make a terminal show a style take no room and columns line up whether or not styles are shown. The codes are added only as the lines are written out.
+
+Whether to show styles is decided when drawing, not when the script runs, so it is not one of a script's inputs: one cached value serves a terminal and a pipe alike. On Windows the console has to be told to act on the codes, which the standard library cannot do, so `render.rs` declares the two system functions that do it. That is the only `unsafe` code in the project.
+
 ### Values
 
 Lists and strings are shared and never changed in place, so passing one around copies nothing.
@@ -92,3 +102,5 @@ Every value except a function has a binary encoding of one tag byte plus payload
 
 - Removing a directory and its contents in one call.
 - Text functions that ignore case.
+- Fitting what is drawn to the width of the terminal, and a plain-ASCII form of boxes, bars, and trees.
+- Right-aligned table columns, and wrapping long cells.
