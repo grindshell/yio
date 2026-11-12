@@ -3,7 +3,9 @@
 //! This is a line-based reader for the subset of Markdown that `yio.md` uses,
 //! not a general Markdown parser.
 
-use crate::command::{Command, Flag, FlagType, Param, is_boolean, is_env_name};
+use crate::command::{
+    Command, Flag, FlagType, Param, check_var_name, is_boolean, same_ignoring_case,
+};
 
 /// Parses the contents of a `yio.md` file. Error messages start with the
 /// 1-based line number.
@@ -16,15 +18,35 @@ pub fn parse(source: &str) -> Result<Command, String> {
         let line = lines[i];
         let text = line.trim();
 
-        if let Some(fence) = Fence::open(line) {
+        if text.is_empty() {
+            loader.end_paragraph()?;
+            i += 1;
+        } else if indentation(line) >= 4 {
+            // Markdown treats this as an indented code block: literal text,
+            // never a script, heading, or marker.
+            loader.paragraph_line(line_no, text);
+            i += 1;
+        } else if text.starts_with("<!--") {
+            // An HTML comment hides everything through the line that closes
+            // it, so a commented-out code block must not become a script.
+            loader.end_paragraph()?;
+            let closes = |j: usize| {
+                let rest = if j == i { &text[2..] } else { lines[j] };
+                rest.contains("-->")
+            };
+            let end = (i..lines.len())
+                .find(|&j| closes(j))
+                .ok_or_else(|| err(line_no, "comment is never closed"))?;
+            i = end + 1;
+        } else if let Some(fence) = Fence::open(line) {
             loader.end_paragraph()?;
             let start = i + 1;
             let end = (start..lines.len())
                 .find(|&j| fence.closes(lines[j]))
                 .ok_or_else(|| err(line_no, "code block is never closed"))?;
-            loader.script(line_no, fence.info, &lines[start..end])?;
+            loader.script(line_no, &fence, &lines[start..end])?;
             i = end + 1;
-        } else if text.is_empty() || is_thematic_break(text) {
+        } else if is_thematic_break(text) {
             loader.end_paragraph()?;
             i += 1;
         } else if let Some((level, title)) = heading(line) {
@@ -160,19 +182,25 @@ impl<'a> Loader<'a> {
         Ok(())
     }
 
-    fn script(&mut self, line_no: usize, info: &str, body: &[&str]) -> Result<(), String> {
+    fn script(&mut self, line_no: usize, fence: &Fence, body: &[&str]) -> Result<(), String> {
         if !self.in_command() {
             return Err(err(line_no, "code block is outside of a command"));
         }
-        let language = info.split_whitespace().next().unwrap_or("");
+        let language = fence.info.split_whitespace().next().unwrap_or("");
         if !(language.is_empty() || language == "bash") {
             return Err(err(
                 line_no,
                 &format!("code block language `{language}` is not supported; only `bash` is"),
             ));
         }
-        let mut script = body.join("\n");
-        script.push('\n');
+        // Markdown removes the fence's own indentation from each line of the
+        // block. Keeping it would break heredoc terminators, among others.
+        let mut script = String::new();
+        for line in body {
+            let spaces = line.bytes().take(fence.indent).take_while(|b| *b == b' ');
+            script.push_str(&line[spaces.count()..]);
+            script.push('\n');
+        }
         self.current().scripts.push(script);
         Ok(())
     }
@@ -210,9 +238,14 @@ impl<'a> Loader<'a> {
         for draft in drafts {
             let line_no = draft.line_no;
             let flag = draft.finish()?;
-            let clash = if command.params.iter().any(|p| p.name == flag.name)
-                || command.flags.iter().any(|f| f.name == flag.name)
+            let names = command.params.iter().map(|p| &p.name);
+            let mut names = names.chain(command.flags.iter().map(|f| &f.name));
+            let clash = if let Some(existing) =
+                names.find(|name| name.eq_ignore_ascii_case(&flag.name))
             {
+                if *existing != flag.name {
+                    return Err(err(line_no, &same_ignoring_case(&flag.name, existing)));
+                }
                 Some(flag.name.clone())
             } else if let Some(c) = flag.short
                 && command.flags.iter().any(|f| f.short == Some(c))
@@ -247,12 +280,7 @@ struct FlagDraft {
 impl FlagDraft {
     fn new(line_no: usize, item: &str) -> Result<Self, String> {
         let name = unquote(item);
-        if !is_env_name(name) {
-            return Err(err(
-                line_no,
-                &format!("`{name}` is not a valid flag name; it must work as an environment variable"),
-            ));
-        }
+        check_var_name(name).map_err(|message| err(line_no, &message))?;
         Ok(FlagDraft {
             line_no,
             flag: Flag {
@@ -386,13 +414,13 @@ fn command_heading(title: &str) -> Result<Command, String> {
                     "unexpected `{token}` after command `{name}`; expected `(ARG)` or `[ARG]`"
                 ));
             };
-        if !is_env_name(inner) {
-            return Err(format!(
-                "`{inner}` is not a valid argument name; it must work as an environment variable"
-            ));
-        }
-        if params.iter().any(|p| p.name == inner) {
-            return Err(format!("argument `{inner}` is defined twice"));
+        check_var_name(inner)?;
+        if let Some(existing) = params.iter().find(|p| p.name.eq_ignore_ascii_case(inner)) {
+            return Err(if existing.name == inner {
+                format!("argument `{inner}` is defined twice")
+            } else {
+                same_ignoring_case(inner, &existing.name)
+            });
         }
         if required && params.last().is_some_and(|p| !p.required) {
             return Err(format!(
@@ -416,9 +444,12 @@ struct Fence<'a> {
     ch: char,
     len: usize,
     info: &'a str,
+    /// Columns the opening fence is indented by, at most three.
+    indent: usize,
 }
 
 impl<'a> Fence<'a> {
+    /// The caller has already ruled out lines indented four or more columns.
     fn open(line: &'a str) -> Option<Self> {
         let rest = line.trim_start();
         let ch = rest.chars().next().filter(|c| matches!(c, '`' | '~'))?;
@@ -428,16 +459,31 @@ impl<'a> Fence<'a> {
         if len < 3 || (ch == '`' && info.contains('`')) {
             return None;
         }
-        Some(Fence { ch, len, info })
+        Some(Fence { ch, len, info, indent: indentation(line) })
     }
 
     fn closes(&self, line: &str) -> bool {
         let text = line.trim();
-        text.len() >= self.len && text.chars().all(|c| c == self.ch)
+        indentation(line) < 4 && text.len() >= self.len && text.chars().all(|c| c == self.ch)
     }
 }
 
-/// Splits an ATX heading into its level and title.
+/// Width of a line's leading whitespace, with tabs advancing to the next
+/// multiple of four.
+fn indentation(line: &str) -> usize {
+    let mut width = 0;
+    for c in line.chars() {
+        match c {
+            ' ' => width += 1,
+            '\t' => width += 4 - width % 4,
+            _ => break,
+        }
+    }
+    width
+}
+
+/// Splits an ATX heading into its level and title. The caller has already
+/// ruled out lines indented four or more columns.
 fn heading(line: &str) -> Option<(usize, &str)> {
     let rest = line.trim_start();
     let level = rest.chars().take_while(|c| *c == '#').count();
@@ -630,12 +676,69 @@ rm -rf out/
             ("## a\n```json\n{}\n```\n", "line 2: code block language `json`"),
             ("## a\n```\nnever closed\n", "line 2: code block is never closed"),
             ("```\necho\n```\n", "outside of a command"),
+            ("## a\n<!--\n```\necho\n```\n", "line 2: comment is never closed"),
+            ("## a (Name) (NAME)\n", "`NAME` differs from `Name` only by case"),
+            ("## a (X) (X)\n", "argument `X` is defined twice"),
+            ("## a (Jobs)\n**FLAGS**\n- JOBS\n  - flags: -j\n", "line 3: `JOBS` differs from `Jobs` only by case"),
+            ("## a [yio_version]\n", "`yio_version` differs from `YIO_VERSION` only by case"),
+            ("## a (WSLENV)\n", "`WSLENV` is reserved"),
+            ("## a\n**FLAGS**\n- wslenv\n  - flags: -w\n", "line 3: `wslenv` is reserved"),
+            ("## a (1X)\n", "`1X` is not a valid name"),
             ("## a\n\n[docs](docs/yio.md)\n", "line 3: embedding `docs/yio.md` is not implemented"),
         ];
         for (source, expected) in cases {
             let error = parse(source).unwrap_err();
             assert!(error.contains(expected), "{source:?} gave {error:?}");
         }
+    }
+
+    #[test]
+    fn commented_out_blocks_are_not_scripts() {
+        let source = "\
+## a
+
+<!--
+```bash
+echo hidden
+```
+-->
+
+<!-- one line --> ignored
+```bash
+echo shown
+```
+
+## b
+<!-- ## c -->
+";
+        let root = parse(source).unwrap();
+        assert_eq!(root.subcommands[0].scripts, ["echo shown\n"]);
+        assert_eq!(root.subcommands[0].long_help, None);
+        let names: Vec<_> = root.subcommands.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, ["a", "b"]);
+    }
+
+    #[test]
+    fn fence_indentation_is_removed_from_the_script() {
+        let source = "## a\n  ```bash\n  cat <<EOF\n    hi\n  EOF\n ok\n   ```\n";
+        let root = parse(source).unwrap();
+        assert_eq!(root.subcommands[0].scripts, ["cat <<EOF\n  hi\nEOF\nok\n"]);
+    }
+
+    #[test]
+    fn four_space_indented_fences_and_headings_are_literal_text() {
+        let source = "## a\n\nExample:\n\n    ```bash\n    echo no\n    ```\n    ## not-a-command\n\t```\n";
+        let root = parse(source).unwrap();
+        let a = &root.subcommands[0];
+        assert!(a.scripts.is_empty());
+        assert!(a.subcommands.is_empty());
+        assert!(a.long_help.as_deref().unwrap().contains("echo no"));
+    }
+
+    #[test]
+    fn a_builtin_name_can_be_reused_exactly() {
+        let root = parse("## a\n**FLAGS**\n- YIO_VERBOSE\n  - flags: --loud\n  - type: boolean\n").unwrap();
+        assert_eq!(root.subcommands[0].flags[0].name, "YIO_VERBOSE");
     }
 
     #[test]

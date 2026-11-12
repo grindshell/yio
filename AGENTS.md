@@ -23,7 +23,7 @@ A Rust crate (edition 2024) with no dependencies. The CLI scaffold exists: it lo
 
 - **Keep the dependency tree as lean as possible.** Prefer `std` and a small amount of hand-written code over a crate. Adding any dependency (including dev/build deps and enabling non-default features) needs a stated justification and the user's sign-off. This applies to the Markdown parser, argument parser, and serialization for the cache.
 - **`docs/` holds design, implementation, and update docs.** Design decisions go there before or alongside the code that implements them. When behavior changes, update the relevant doc in the same change.
-- Licensing is MIT OR Apache-2.0; new files and any vendored code must be compatible.
+- Licensing is MIT OR Apache-2.0 (`LICENSE-MIT`, `LICENSE-APACHE`); new files and any vendored code must be compatible.
 - Do not guess on the items under [Open questions](#open-questions); ask.
 
 ## Commands
@@ -45,7 +45,7 @@ cargo run -- <args>
 - **Named flags**: a paragraph containing `**FLAGS**`, immediately followed (newline optional) by a `-` delimited list. Each top-level item is one flag. Sub-items configure it with the keys `flags`, `type`, `default`, and `description`. Only `flags` is mandatory, the type defaults to string, and flags may have default values (unlike `mask`).
 - **Embedding**: when a relative link is the only content of a heading's paragraph, the linked `yio.md` is loaded in place as part of the same run. No second `yio` process is spawned.
 
-Arguments and flags are injected into the script's environment under the name exactly as written. There is no automatic case conversion.
+Arguments and flags are injected into the script's environment under the name exactly as written. There is no automatic case conversion. Because Windows environment names are case-insensitive, names within one command must be unique ignoring case.
 
 Example:
 

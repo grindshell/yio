@@ -20,13 +20,26 @@ Nothing about the commands is known at compile time, so there is no argument-par
 
 ## Help
 
-`--help` / `-h` describes the resolved command instead of running it: its short help, usage line, subcommands, and flags. Paragraph text is added with `--verbose`, for the command itself and for each listed subcommand. Required arguments may be left out, so `yio build --help` works. It takes precedence over `--version`.
+`--help` / `-h` describes the resolved command instead of running it: its short help, usage, subcommands, and flags. Paragraph text is added with `--verbose`, for the command itself and for each listed subcommand. It takes precedence over `--version`. Neither runs the command, so both work without its required arguments: `yio build --help`, `yio build --version`.
+
+Usage is shown as one form per way of invoking the command, because a subcommand is only recognized before the first argument:
+
+```
+Usage: yio build (TARGET) [PROFILE] [flags]
+       yio build <command> [flags]
+```
+
+The first form is left out when the command has subcommands and nothing to run; the second when it has no subcommands.
+
+The flag list shows what the parser will actually do. A command's flag shadows a built-in one spelling at a time, so a command that defines `-h --hot` lists the built-in as `--help` only, and a built-in with every spelling shadowed is not listed.
 
 `yio --help` describes the root. Without a `yio.md` that is the CLI on its own: a one-line description and the built-in flags. Every other invocation without a `yio.md` is an error, apart from `--version`.
 
 A command with no code block has nothing to run, so naming it prints the same description.
 
 ## Running
+
+The bash that runs is the first one on `PATH`. On Windows `yio` searches `PATH` for `bash.exe` itself, because the standard library looks in the system directories first and would pick the WSL launcher in System32 over a bash that comes earlier on `PATH`.
 
 Each code block of a command runs as its own `bash -c` process, in the order written. They share the injected variables and nothing else: shell variables, options, and the working directory set by one block do not reach the next. The first block that exits non-zero stops the run, and its exit code becomes `yio`'s.
 
@@ -54,13 +67,23 @@ Every argument and flag of the resolved command is set, so a script never sees a
 
 `YIO_HELP`, `YIO_VERBOSE`, `YIO_CACHE`, and `YIO_REMOVE_CACHE` are always set to `true` or `false`, and `YIO_VERSION` to the CLI's version.
 
-On Windows the injected names are also appended to `WSLENV`, because the `bash` on `PATH` is often the WSL launcher and it forwards nothing else.
+On Windows the injected names are also appended to `WSLENV`, because the `bash` on `PATH` is often the WSL launcher and it forwards nothing else. The name `WSLENV` is therefore reserved.
+
+### Variable names
+
+Names are injected exactly as written, but Windows treats environment variable names as case-insensitive, so `Name` and `NAME` would silently become one variable there. To keep a `yio.md` behaving the same on every platform, the loader rejects, on every platform:
+
+- two arguments or flags of one command whose names differ only by case;
+- a name that differs from a built-in only by case, such as `yio_version` (the exact name `YIO_VERSION` is an override and is allowed);
+- `WSLENV`, in any case.
 
 ## What the loader accepts
 
 - One optional H1, before any command. Its text is ignored; a blockquote and paragraphs under it describe the file as a whole.
 - A heading is one command name followed by `(ARG)` and `[ARG]` tokens. Argument and flag names must be valid environment variable names.
 - Any number of code blocks per command, each with no language or `bash`. Any other language is an error, so that a `json` example is never run as a script.
+- A fence may be indented up to three spaces, and that indentation is removed from each line of the script, as Markdown does. Anything indented four or more spaces (or a tab) is literal text: it is never a script, heading, or marker, and it lands in the verbose help.
+- An HTML comment that starts a line (`<!--`) hides everything through the line containing `-->`, so a commented-out code block or heading is ignored. A comment that is never closed is an error.
 - `**FLAGS**` on its own line, then a list. Options are `flags` (required), `type` (`string` or `boolean`), `default`, and `description`. Values may be wrapped in backticks.
 
 Errors name the line: `yio.md: line 12: flag `JOBS` is missing its `flags` option`.

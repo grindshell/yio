@@ -1,5 +1,6 @@
 //! Runs a command's scripts.
 
+use std::path::PathBuf;
 use std::process::{Command as Process, ExitCode};
 
 /// Runs each script in its own bash process, in order, adding `env` to the
@@ -7,13 +8,15 @@ use std::process::{Command as Process, ExitCode};
 /// the next one. Stops at the first script that fails and returns its exit
 /// code.
 pub fn run(scripts: &[String], env: &[(&str, String)]) -> Result<ExitCode, String> {
+    let bash = bash();
     for script in scripts {
-        let mut process = Process::new("bash");
+        let mut process = Process::new(&bash);
         process.arg("-c").arg(script);
         process.envs(env.iter().map(|(name, value)| (*name, value.as_str())));
 
-        // On Windows the `bash` on PATH is often the WSL launcher, which only
-        // forwards the variables named in WSLENV. Other bashes ignore it.
+        // When the bash found on a Windows PATH is the WSL launcher, only the
+        // variables named in WSLENV are forwarded. Other bashes ignore it.
+        // The loader reserves the name, so this never replaces a user value.
         #[cfg(windows)]
         {
             let mut wslenv = std::env::var("WSLENV").unwrap_or_default();
@@ -28,7 +31,7 @@ pub fn run(scripts: &[String], env: &[(&str, String)]) -> Result<ExitCode, Strin
 
         let status = process
             .status()
-            .map_err(|error| format!("could not run bash: {error}"))?;
+            .map_err(|error| format!("could not run `{}`: {error}", bash.display()))?;
         if !status.success() {
             // No code means the script was killed by a signal.
             let code = status.code().and_then(|code| u8::try_from(code).ok());
@@ -36,4 +39,23 @@ pub fn run(scripts: &[String], env: &[(&str, String)]) -> Result<ExitCode, Strin
         }
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// The bash to run: the first one on `PATH`.
+///
+/// On Windows that lookup is done here rather than left to the standard
+/// library, which searches the system directories before `PATH` and so picks
+/// the WSL launcher in System32 even when another bash comes first.
+fn bash() -> PathBuf {
+    #[cfg(windows)]
+    {
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        let found = std::env::split_paths(&path)
+            .map(|dir| dir.join("bash.exe"))
+            .find(|candidate| candidate.is_file());
+        if let Some(found) = found {
+            return found;
+        }
+    }
+    PathBuf::from("bash")
 }

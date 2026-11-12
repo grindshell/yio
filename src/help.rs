@@ -16,19 +16,30 @@ pub fn render(path: &[&str], command: &Command, verbose: bool) -> String {
         out.push_str("\n\n");
     }
 
-    out.push_str("Usage: yio");
+    let mut prefix = String::from("yio");
     for name in path {
-        out.push(' ');
-        out.push_str(name);
+        prefix.push(' ');
+        prefix.push_str(name);
     }
-    for param in &command.params {
-        out.push(' ');
-        out.push_str(&param_label(param));
+    // A subcommand is only recognized before the first argument, so running
+    // the command and naming one of its subcommands are separate forms.
+    let mut forms = Vec::new();
+    if !command.scripts.is_empty() || command.subcommands.is_empty() {
+        let mut form = prefix.clone();
+        for param in &command.params {
+            form.push(' ');
+            form.push_str(&param_label(param));
+        }
+        forms.push(form);
     }
     if !command.subcommands.is_empty() {
-        out.push_str(" <command>");
+        forms.push(format!("{prefix} <command>"));
     }
-    out.push_str(" [flags]\n");
+    for (i, form) in forms.iter().enumerate() {
+        out.push_str(if i == 0 { "Usage: " } else { "       " });
+        out.push_str(form);
+        out.push_str(" [flags]\n");
+    }
 
     if !command.subcommands.is_empty() {
         out.push_str("\nCommands:\n");
@@ -38,13 +49,8 @@ pub fn render(path: &[&str], command: &Command, verbose: bool) -> String {
 
     out.push_str("\nFlags:\n");
     let mut rows: Vec<Row> = command.flags.iter().map(flag_row).collect();
-    let overridden = |b: &Builtin| command.flags.iter().any(|f| f.name == b.env_name());
-    rows.extend(
-        Builtin::ALL
-            .into_iter()
-            .filter(|builtin| !overridden(builtin))
-            .map(builtin_row),
-    );
+    let builtins = Builtin::ALL.into_iter();
+    rows.extend(builtins.filter_map(|builtin| builtin_row(command, builtin)));
     table(&mut out, &rows, false);
     out
 }
@@ -103,12 +109,20 @@ fn flag_row(flag: &Flag) -> Row<'_> {
     Row { label, text, detail: None }
 }
 
-fn builtin_row<'a>(builtin: Builtin) -> Row<'a> {
-    Row {
-        label: flag_label(builtin.short(), Some(builtin.long())),
+/// The row for a built-in, showing only the spellings that still reach it.
+/// The command's own flags shadow built-ins spelling by spelling, exactly as
+/// the parser resolves them.
+fn builtin_row<'a>(command: &Command, builtin: Builtin) -> Option<Row<'a>> {
+    let short = builtin.short().filter(|c| command.short_flag(*c).is_none());
+    let long = Some(builtin.long()).filter(|name| command.long_flag(name).is_none());
+    if short.is_none() && long.is_none() {
+        return None;
+    }
+    Some(Row {
+        label: flag_label(short, long),
         text: builtin.description().to_string(),
         detail: None,
-    }
+    })
 }
 
 fn flag_label(short: Option<char>, long: Option<&str>) -> String {
@@ -147,6 +161,10 @@ Longer description.
   - flags: -j --jobs
   - default: 4
   - description: Parallel jobs
+
+```
+echo
+```
 
 ### clean
 
@@ -188,7 +206,40 @@ Flags:
     fn lists_a_command_with_its_own_flags() {
         let root = markdown::parse(SOURCE).unwrap();
         let listing = render(&["build"], &root.subcommands[0], false);
-        assert!(listing.contains("Usage: yio build (TARGET) [PROFILE] <command> [flags]\n"));
+        assert!(listing.contains(
+            "Usage: yio build (TARGET) [PROFILE] [flags]\n       yio build <command> [flags]\n"
+        ));
         assert!(listing.contains("  -j, --jobs <JOBS>   Parallel jobs [default: 4]\n"));
+    }
+
+    #[test]
+    fn usage_omits_the_form_that_cannot_be_used() {
+        let root = markdown::parse("## group (X)\n### leaf (Y)\n```\necho\n```\n").unwrap();
+        let group = &root.subcommands[0];
+        let listing = render(&["group"], group, false);
+        assert!(listing.contains("Usage: yio group <command> [flags]\n\n"));
+        let listing = render(&["group", "leaf"], &group.subcommands[0], false);
+        assert!(listing.contains("Usage: yio group leaf (Y) [flags]\n\n"));
+    }
+
+    #[test]
+    fn shadowed_builtin_spellings_are_not_advertised() {
+        let source = "\
+## a
+
+**FLAGS**
+- HOT
+  - flags: -h --hot
+  - type: boolean
+- V
+  - flags: -V --verbose
+  - type: boolean
+";
+        let root = markdown::parse(source).unwrap();
+        let listing = render(&["a"], &root.subcommands[0], false);
+        assert!(listing.contains("  -h, --hot\n"));
+        assert!(listing.contains("      --help          Show help for a command\n"));
+        assert!(!listing.contains("Show verbose help text"));
+        assert!(listing.contains("  -v, --version       Print the yio version\n"));
     }
 }

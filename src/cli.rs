@@ -135,19 +135,15 @@ struct State<'a, 'b> {
 
 impl<'a, 'b> State<'a, 'b> {
     fn long(&self, name: &str) -> Option<Target<'a>> {
-        let user = self.command.flags.iter();
-        let user = user.filter(|f| f.long.as_deref() == Some(name)).map(Target::User);
-        let builtin = Builtin::ALL.into_iter();
-        let builtin = builtin.filter(|b| b.long() == name).map(Target::Builtin);
-        user.chain(builtin).next()
+        let user = self.command.long_flag(name).map(Target::User);
+        let mut builtins = Builtin::ALL.into_iter();
+        user.or_else(|| builtins.find(|b| b.long() == name).map(Target::Builtin))
     }
 
     fn short(&self, c: char) -> Option<Target<'a>> {
-        let user = self.command.flags.iter();
-        let user = user.filter(|f| f.short == Some(c)).map(Target::User);
-        let builtin = Builtin::ALL.into_iter();
-        let builtin = builtin.filter(|b| b.short() == Some(c)).map(Target::Builtin);
-        user.chain(builtin).next()
+        let user = self.command.short_flag(c).map(Target::User);
+        let mut builtins = Builtin::ALL.into_iter();
+        user.or_else(|| builtins.find(|b| b.short() == Some(c)).map(Target::Builtin))
     }
 
     fn apply(
@@ -226,8 +222,9 @@ impl<'a, 'b> State<'a, 'b> {
         for (i, param) in command.params.iter().enumerate() {
             let value = match self.positionals.get(i) {
                 Some(value) => value.to_string(),
-                // Asking for help on a command should not require its arguments.
-                None if param.required && !self.builtins.help => {
+                // `--help` and `--version` do not run the command, so they
+                // should not require its arguments.
+                None if param.required && !self.builtins.help && !self.builtins.version => {
                     return Err(format!(
                         "missing required argument `({})` for `{path}`",
                         param.name
@@ -420,6 +417,14 @@ echo
         }
         assert!(parse(&root, &args("--help")).unwrap().path.is_empty());
         assert!(parse(&root, &args("nope --help")).is_err());
+    }
+
+    #[test]
+    fn version_does_not_require_arguments() {
+        let root = tree();
+        for line in ["build --version", "build -v", "-v build"] {
+            assert!(parse(&root, &args(line)).unwrap().builtins.version, "{line}");
+        }
     }
 
     #[test]
