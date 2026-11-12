@@ -627,7 +627,8 @@ docs
     /// and what it draws, so the two have to agree.
     #[test]
     fn the_layout_example_in_the_api_doc_is_what_it_draws() {
-        let doc = include_str!("../../docs/scripting-api.md");
+        // Git on Windows may check the document out with CRLF line endings.
+        let doc = include_str!("../../docs/scripting-api.md").replace("\r\n", "\n");
         let section = doc.split("### Layout and style").nth(1).unwrap();
         let mut blocks = section.split("```");
         let source = blocks.nth(1).unwrap().strip_prefix("lisp\n").unwrap();
