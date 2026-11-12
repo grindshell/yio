@@ -94,7 +94,6 @@ Errors name the file and line: `yio.md: line 12: flag `JOBS` is missing its `fla
 
 ## Not implemented
 
-- `--cache` and `--remove-cache`. They parse, and using both is an error, but neither does anything yet.
-- `.yio/` plugins and the scripting language.
+- `.yio/` plugins and the scripting language. The command tree cache exists; see `scripting-language.md`.
 - Type-checking boolean variables inside scripts.
 - `.yiorc`.

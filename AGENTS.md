@@ -8,7 +8,7 @@ The file format is heavily inspired by [`mask`](https://github.com/jacobdeichert
 
 ## Status
 
-A Rust crate (edition 2024) with no dependencies. The CLI scaffold exists: it loads `yio.md` and the files it embeds, resolves commands, arguments, and flags, lists commands, and runs scripts with bash. The cache, `.yio/` plugins, the scripting language, and `.yiorc` are design only. Check `docs/` and the code before assuming a feature exists.
+A Rust crate (edition 2024) with no dependencies. The CLI scaffold exists: it loads `yio.md` and the files it embeds, resolves commands, arguments, and flags, lists commands, runs scripts with bash, and caches the command tree. `.yio/` plugins, the scripting language, and `.yiorc` are design only. Check `docs/` and the code before assuming a feature exists.
 
 | File | Role |
 | --- | --- |
@@ -17,8 +17,11 @@ A Rust crate (edition 2024) with no dependencies. The CLI scaffold exists: it lo
 | `src/cli.rs` | Command-line arguments to a resolved command and its values |
 | `src/help.rs` | Command listings |
 | `src/run.rs` | Runs a script with bash |
+| `src/cache.rs` | `.yio/cache.yio`: encoding, input fingerprints, dirtiness check |
+| `src/script/reader.rs` | `.yio` source bytes to forms (not yet called by the CLI) |
 | `docs/cli-parsing.md` | The parsing and running rules the above implement |
 | `docs/embedding.md` | How one `yio.md` embeds another |
+| `docs/scripting-language.md` | Plan for the scripting language, cache, and plugins; the reader and the command tree cache are implemented |
 
 ## Repo rules
 
@@ -101,8 +104,9 @@ Present on every command; a `yio.md` may override them.
 
 - `yio` with no arguments, in a directory containing `yio.md`: parse the file and write the top-level commands and options to stdout. (This differs from `mask`.)
 - `yio --help` / `-h`: show a formatted description of the given command or subcommand instead of running it. With no command, and with no `yio.md`, it describes the CLI itself.
-- `yio --cache`: write the interpreted result to `.yio/cache.yio`, a cached AST of the commands, subcommands, and options.
-- `yio --remove-cache`: remove that cache.
+- `yio --cache`: write the interpreted result to `.yio/cache.yio`, a cached AST of the commands, subcommands, and options, and exit.
+- `yio --remove-cache`: remove that cache and exit.
+- While the cache file exists it is used when its inputs are unchanged, and rewritten when they are not. A stale cache is never used.
 
 ### Cache format
 
@@ -170,6 +174,5 @@ Also planned: text-manipulation built-ins for parsing file contents.
 
 Not yet decided. Ask rather than assume.
 
-- How cache dirtiness is detected. `stat`-ing the input files is the leading idea, not a decision.
-- The layout of the compressed AST bytes inside `(cache ...)`.
+- The scripting language decisions listed at the end of `docs/scripting-language.md`: reassignment, the script output model, how plugins interact with the cache, when `post/` runs, and where scripts may read and write.
 - Scope and format of `.yiorc`.
