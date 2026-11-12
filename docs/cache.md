@@ -31,7 +31,7 @@ Process startup is about 6.5 ms of every figure. The project case embeds three d
 The cache file existing is what turns caching on.
 
 - `yio --cache` computes everything again, ignoring any existing cache: it loads the Markdown and runs every plugin, then writes `.yio/cache.yio` and exits. It does not list or run a command.
-- `yio --remove-cache` deletes the file and exits. It works even when `yio.md` fails to load.
+- `yio --remove-cache` deletes the file and exits. If that leaves `.yio/` empty, the directory goes too, since `--cache` made it where there was none. A `.yio/` that holds plugins stays. It works even when `yio.md` fails to load.
 - While the file exists, every run uses each unit that is clean and recomputes each one that is not, then rewrites the file if anything changed. The cache stays current without `--cache` being run again, and a stale result is never used.
 - A unit the run did not need is dropped, which is how the result of a deleted plugin goes away.
 - A run that does not run plugins (`--version`) sees only part of what the cache holds, so it leaves the file alone.

@@ -16,7 +16,7 @@ The `yio` binary is expected on `PATH`. If `yio --version` fails, say so and poi
 1. **Look.** Run `yio` in the directory to list the commands, and read the `yio.md`. Check for a `.yio/` directory: plugins there run on every use of the file (see "Plugins" below).
 2. **Edit** the `yio.md`.
 3. **Check.** Run `yio` again. A file that does not load fails with `yio: yio.md: line N: ...`, which says what to fix. Then `yio COMMAND --help` to see a command as a user will, and run the command when that is harmless.
-4. **Check the booleans.** `yio --cache` reads every script and warns when one tests a boolean flag in a way that cannot work. It writes `.yio/cache.yio`, so if that file was not there before and the project does not want a cache (see [references/plugins.md](references/plugins.md) for when it does), finish with `yio --remove-cache`, and delete the `.yio/` directory too if it is left empty and was not there before.
+4. **Check the booleans.** `yio --cache` reads every script and warns when one tests a boolean flag in a way that cannot work. It writes `.yio/cache.yio`, so if that file was not there before and the project does not want a cache (see [references/plugins.md](references/plugins.md) for when it does), finish with `yio --remove-cache`. That also removes a `.yio/` directory it leaves empty.
 
 `--help` never runs a command's script, so it is safe on any command. It does still run the directory's plugins; only `--version` and `--remove-cache` run nothing.
 

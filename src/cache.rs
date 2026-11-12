@@ -156,8 +156,23 @@ pub fn write(contents: &[u8]) -> io::Result<()> {
 
 /// Deletes the cache file. Returns whether there was one.
 pub fn remove() -> io::Result<bool> {
-    match fs::remove_file(FILE) {
-        Ok(()) => Ok(true),
+    remove_file(Path::new(FILE))
+}
+
+/// Deletes a cache file, and the `.yio/` directory it was in when that
+/// leaves the directory empty. `yio --cache` makes that directory where
+/// there was none, so removing the cache should leave none behind.
+fn remove_file(file: &Path) -> io::Result<bool> {
+    match fs::remove_file(file) {
+        Ok(()) => {
+            // This fails for a directory that still holds something, such
+            // as plugins, which is exactly when it should stay. A directory
+            // that was already empty of a cache is not touched at all.
+            if let Some(dir) = file.parent() {
+                let _ = fs::remove_dir(dir);
+            }
+            Ok(true)
+        }
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
         Err(error) => Err(error),
     }
@@ -633,5 +648,30 @@ echo \"two\"
         session.put(tree_unit());
         assert_eq!(session.refreshed(), None);
         assert_eq!(parse(&session.contents()).unwrap(), [tree_unit()]);
+    }
+
+    #[test]
+    fn removing_the_file_takes_a_directory_it_leaves_empty() {
+        let scratch = crate::testing::Scratch::new("cache-remove");
+        let file = scratch.write(".yio/cache.yio", "x");
+        let dir = scratch.path(".yio");
+        assert!(remove_file(&file).unwrap());
+        assert!(!dir.exists());
+        // Nothing to remove is not an error.
+        assert!(!remove_file(&file).unwrap());
+
+        // A directory that holds anything else stays, with what it holds.
+        let file = scratch.write(".yio/cache.yio", "x");
+        let plugin = scratch.write(".yio/pre/0000_a.yio", "1");
+        assert!(remove_file(&file).unwrap());
+        assert!(!file.exists());
+        assert!(plugin.exists());
+
+        // One that is empty but never held a cache is not this command's
+        // to remove.
+        let empty = crate::testing::Scratch::new("cache-remove-empty");
+        std::fs::create_dir(empty.path(".yio")).unwrap();
+        assert!(!remove_file(&empty.path(".yio/cache.yio")).unwrap());
+        assert!(empty.path(".yio").exists());
     }
 }
