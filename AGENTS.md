@@ -18,6 +18,7 @@ A Rust crate (edition 2024) with no dependencies. It loads `yio.md` and the file
 | `src/cli.rs` | Command-line arguments to a resolved command and its values |
 | `src/help.rs` | Command listings |
 | `src/run.rs` | Runs a script with bash |
+| `src/check.rs` | Warns about boolean variables a script uses in a way that cannot work |
 | `src/cache.rs` | `.yio/cache.yio`: the file format, and what one run keeps, replaces, and drops |
 | `src/bytes.rs` | The byte-level encoding used inside the cache file |
 | `src/input.rs` | What a cached result depended on, and whether it still holds |
@@ -128,7 +129,7 @@ Present on every command; a `yio.md` may override them.
 | `YIO_REMOVE_CACHE` | `--remove-cache` | boolean |
 
 - `YIO_VERSION` is the CLI's own Cargo semver string. `--version` prints it, and it is always injected into scripts.
-- Booleans are the strings `"true"` and `"false"`. The CLI type-checks them, including usage inside scripts where that is relatively trivial to do.
+- Booleans are the strings `"true"` and `"false"`. The CLI type-checks the values given for them. With a cache, it also warns about scripts that use a boolean in a way that cannot work, such as `[ -n "$FLAG" ]`; the command still runs. See "Boolean checks" in `docs/cli-parsing.md`.
 - Passing `--cache` and `--remove-cache` together is an error.
 
 ## CLI behavior

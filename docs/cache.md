@@ -122,7 +122,7 @@ so a cache file is `(cache #5120:` followed by 5120 bytes and `)`. The cache loa
 Payload, with all integers fixed-width little-endian (no varint branching) and strings as a `u32` length plus UTF-8 (`src/bytes.rs`):
 
 ```
-u8   format version (currently 4)
+u8   format version (currently 5)
 str  yio version
 u32  unit count
 unit:
@@ -137,7 +137,7 @@ unit:
 
 Each unit has its own as-of time, because units are recomputed on different runs. The body length lets a dirty unit be skipped without decoding it.
 
-A command tree body is the `Command` records in pre-order, decoded in one pass straight into the structs the CLI already uses. A script result body is a value as one tag byte plus payload (`src/script/encode.rs`). A value nested more than 256 levels deep is not stored, so its script simply runs every time.
+A command tree body is the `Command` records in pre-order, decoded in one pass straight into the structs the CLI already uses. Each script is stored with the line of its `yio.md` it starts on, so that warnings about it can name the line. A script result body is a value as one tag byte plus payload (`src/script/encode.rs`). A value nested more than 256 levels deep is not stored, so its script simply runs every time.
 
 The encoding is compact but not compressed. General-purpose compression (deflate and the like) would need a dependency or a hand-written codec and would make loading slower.
 

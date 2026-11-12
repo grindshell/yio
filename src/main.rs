@@ -1,5 +1,6 @@
 mod bytes;
 mod cache;
+mod check;
 mod cli;
 mod command;
 mod help;
@@ -105,6 +106,8 @@ fn run() -> Result<ExitCode, String> {
         return Err(missing());
     }
     if builtins.cache {
+        // Building the cache is the moment to look over every script.
+        warn_all(&root);
         cache::write(&session.contents())
             .map_err(|error| format!("could not write {}: {error}", cache::FILE))?;
         println!("wrote {}", cache::FILE);
@@ -117,9 +120,29 @@ fn run() -> Result<ExitCode, String> {
     if command.scripts.is_empty() {
         describe()
     } else {
+        // Only with a cache, which is where the extra work is asked for.
+        if session.active() {
+            warn(command);
+        }
         let list = invocation.rest.as_ref().map(|(name, values)| (*name, values.as_slice()));
         run::run(&command.scripts, &invocation.env(), list, command.dir.as_deref())
     }
+}
+
+/// Reports the uses of boolean variables in a command's scripts that
+/// cannot work. These are warnings: the command still runs.
+fn warn(command: &Command) {
+    let dir = command.dir.as_deref().unwrap_or(Path::new(""));
+    let file = dir.join(FILE).to_string_lossy().replace('\\', "/");
+    for warning in check::booleans(command) {
+        eprintln!("yio: warning: {file}: line {}: {}", warning.line, warning.message);
+    }
+}
+
+/// Does the same for a command and everything under it.
+fn warn_all(command: &Command) {
+    warn(command);
+    command.subcommands.iter().for_each(warn_all);
 }
 
 fn version() -> Result<ExitCode, String> {

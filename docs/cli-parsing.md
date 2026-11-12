@@ -123,6 +123,55 @@ Names are injected exactly as written, but Windows treats environment variable n
 - a name that differs from a built-in only by case, such as `yio_version` (the exact name `YIO_VERSION` is an override and is allowed);
 - `WSLENV`, in any case.
 
+## Boolean checks
+
+A boolean flag reaches a script as the string `true` or `false`. It is never empty and never a number, which makes some natural-looking tests give the same answer whichever it is:
+
+```bash
+if [ -n "$RELEASE" ]; then   # always true: "false" is not empty
+```
+
+When there is a cache, `yio` looks for such uses and warns about them on stderr. They are warnings only: the command still runs, and its exit code is unchanged.
+
+```
+yio: warning: yio.md: line 11: `RELEASE` is always `true` or `false`, never empty, so this test gives the same answer either way; compare it with `true` instead: [ "$RELEASE" = true ]
+```
+
+- `yio --cache` reports every script in the tree, embedded files included.
+- Running a command while `.yio/cache.yio` exists reports that command's scripts, each time.
+- Without a cache nothing is checked.
+
+The variables checked are the command's own boolean flags and `YIO_HELP`, `YIO_VERBOSE`, `YIO_CACHE`, and `YIO_REMOVE_CACHE`, except one whose name the command has given to an argument or to a flag of another type.
+
+| Flagged | Why |
+| --- | --- |
+| `[ -n "$X" ]`, `[ -z "$X" ]`, `[ "$X" ]`, `[ "$X" != "" ]` | It is never empty |
+| `[ "$X" = 1 ]`, `[ "$X" == yes ]` | It only ever equals `true` or `false` |
+| `[ "$X" -eq 1 ]` and the other number comparisons | It is not a number |
+| `(( X ))`, `$(( X + 1 ))` | Arithmetic reads `true` and `false` as unset variables, so both are 0 |
+| `${X:+text}`, `${X+text}` | It is always set, so the text is used even for `false` |
+
+The same holds in `[[ ]]` and `test`, with `!`, and for one condition among several joined by `&&`, `||`, `-a`, or `-o`.
+
+| Not flagged | Why |
+| --- | --- |
+| `[ "$X" = true ]`, `[[ $X != false ]]` | This is the comparison that works |
+| `if $X; then`, `"$X" && ...` | `true` and `false` are commands, so running it works |
+| `case "$X" in` | |
+| `--release="$X"`, `echo "$X"`, `other=$X` | Handing it on is not a test |
+| `[ "$X" = "$OTHER" ]` | What it is compared with is only known when the script runs |
+| `${X:-false}` | The default is never used, but it does no harm |
+
+This is a heuristic over the text of a script, one line at a time. It is not a bash parser, and it reports only what it recognizes and is sure is wrong. So no warning does not mean a script is right. In particular it does not see:
+
+- a test that continues onto the next line;
+- a boolean that was first copied into another variable;
+- how a function or a program the script calls uses the value.
+
+It also takes the body of a here-document for code, so text there that looks like a test is reported.
+
+Implemented in `src/check.rs`.
+
 ## What the loader accepts
 
 - One optional H1, before any command. Its text is ignored; a blockquote and paragraphs under it describe the file as a whole.
@@ -136,5 +185,5 @@ Errors name the file and line: `yio.md: line 12: flag `JOBS` is missing its `fla
 
 ## Not implemented
 
-- Type-checking boolean variables inside bash scripts.
+- Checking booleans without a cache, and a way to silence a warning. See "Boolean checks".
 - `.yiorc`, which is not designed yet.

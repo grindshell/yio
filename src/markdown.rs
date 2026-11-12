@@ -464,6 +464,8 @@ impl<'a, 'c> Loader<'a, 'c> {
             script.push('\n');
         }
         self.current().scripts.push(script);
+        // The script starts on the line after its opening fence.
+        self.current().lines.push(line_no + 1);
         Ok(())
     }
 
@@ -994,6 +996,8 @@ rm -rf out/
     fn keeps_every_code_block_in_order() {
         let root = parse("## a\n```\none\n```\nBetween.\n~~~bash\ntwo\n~~~\n").unwrap();
         assert_eq!(root.subcommands[0].scripts, ["one\n", "two\n"]);
+        // Each is remembered with the line its first line is on.
+        assert_eq!(root.subcommands[0].lines, [3, 7]);
     }
 
     #[test]

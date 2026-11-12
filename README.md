@@ -177,6 +177,8 @@ Every built-in of the scripting language records what it looked at, which is wha
 
 With the table plugin above over 1000 files, a run takes 138 ms without the cache and 15 ms with it.
 
+With a cache, `yio` also warns when a script tests a boolean flag in a way that cannot work, such as `[ -n "$RELEASE" ]`, which is true for `false` as well. The command still runs.
+
 The cache describes one machine's files, so add `.yio/cache.yio` to your `.gitignore`.
 
 How the cache decides what is out of date is in [docs/cache.md](docs/cache.md), and when plugins run in [docs/plugins.md](docs/plugins.md).

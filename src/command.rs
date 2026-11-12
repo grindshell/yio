@@ -20,6 +20,9 @@ pub struct Command {
     /// Bodies of the code blocks, in order. Each runs in its own bash process.
     /// A command without any only groups subcommands.
     pub scripts: Vec<String>,
+    /// For each of `scripts`, the line of its `yio.md` that its first line
+    /// is on, counting from 1.
+    pub lines: Vec<usize>,
     pub subcommands: Vec<Command>,
     /// Directory of the `yio.md` that defines the command, relative to the
     /// current directory, and where its scripts run. `None` for the current
