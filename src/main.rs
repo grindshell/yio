@@ -315,6 +315,48 @@ mod tests {
         });
     }
 
+    /// The skill in `skills/yio/` teaches the format by example, away from
+    /// this repository. Every `yio.md` it shows has to be one that loads,
+    /// and that uses its booleans the way the skill says to.
+    #[test]
+    fn the_examples_in_the_skill_load() {
+        let skill = Path::new(env!("CARGO_MANIFEST_DIR")).join("skills/yio");
+        // What an example embeds is not part of it, so any file will do.
+        let read = |_: &Path, _: &[String]| Ok("## embedded\n\n```\ntrue\n```\n".to_string());
+        for file in ["SKILL.md", "references/plugins.md"] {
+            let mut examples = 0;
+            let text = std::fs::read_to_string(skill.join(file)).unwrap();
+            // An example of a whole file is fenced with four backticks,
+            // since it has code blocks of its own.
+            let mut inside: Option<String> = None;
+            for line in text.lines() {
+                match &mut inside {
+                    None if line == "````markdown" => inside = Some(String::new()),
+                    None => {}
+                    Some(source) if line == "````" => {
+                        let root = markdown::load(Path::new(FILE), source, &read)
+                            .unwrap_or_else(|error| panic!("{file}: {error}\n{source}"));
+                        fn each(command: &Command, visit: &mut dyn FnMut(&Command)) {
+                            visit(command);
+                            command.subcommands.iter().for_each(|sub| each(sub, visit));
+                        }
+                        each(&root, &mut |command| {
+                            assert_eq!(check::booleans(command), [], "{file}: `{}`", command.name);
+                        });
+                        examples += 1;
+                        inside = None;
+                    }
+                    Some(source) => {
+                        source.push_str(line);
+                        source.push('\n');
+                    }
+                }
+            }
+            assert!(inside.is_none(), "{file} ends inside an example");
+            assert!(examples > 0, "{file} has no example to check");
+        }
+    }
+
     #[test]
     fn a_tree_says_where_each_directory_is_embedded() {
         let files = [

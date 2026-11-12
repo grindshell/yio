@@ -60,6 +60,7 @@ A link that ends in `#` and a heading's anchor embeds only that command:
 - A link with nothing after the `#` embeds the whole file.
 
 No heading having that anchor is an error at the link. So is an anchor that belongs to the H1, which is not a command.
+
 ## Where embedded scripts run
 
 A script runs in the directory of the `yio.md` that defines it. `yio docs build` from the project root and `yio build` from inside `docs/` run the same script in the same directory, so a `yio.md` behaves the same whether it is used directly or embedded.
@@ -82,7 +83,8 @@ yio: docs/yio.md: line 12: flag `JOBS` is missing its `flags` option
   yio: b/yio.md: line 3: `a/yio.md` is already being loaded; embeds cannot form a cycle
   ```
 
-- A file may not embed a section of itself. `[build](#build)` and `[build](yio.md#build)` are both errors, wherever in the file they are.- Embeds may nest at most 32 files deep. That limit only exists to stop loops that paths cannot reveal, such as a symlink pointing at a parent directory.
+- A file may not embed a section of itself. `[build](#build)` and `[build](yio.md#build)` are both errors, wherever in the file they are.
+- Embeds may nest at most 32 files deep. That limit only exists to stop loops that paths cannot reveal, such as a symlink pointing at a parent directory.
 
 ## Plugins and the cache
 

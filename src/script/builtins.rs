@@ -1048,22 +1048,32 @@ mod tests {
     /// `docs/scripting-api.md` is the reference, and the table `yio` draws
     /// in `docs/` is read out of it, so it has to list exactly what exists:
     /// one table row per keyword and built-in, starting with the call.
+    ///
+    /// The skill in `skills/yio/` carries a reference of its own, since it
+    /// is used where this repository is not. It is held to the same rule.
     #[test]
     fn the_api_doc_lists_every_keyword_and_built_in() {
-        let doc = include_str!("../../docs/scripting-api.md");
-        let mut documented: Vec<&str> = doc
-            .lines()
-            .filter_map(|line| line.strip_prefix("| `("))
-            .map(|call| call.split([' ', ')']).next().unwrap_or_default())
-            .collect();
         let mut actual: Vec<&str> = KEYWORDS
             .iter()
             .copied()
             .chain(BUILTINS.iter().map(|builtin| builtin.name))
             .collect();
-        documented.sort_unstable();
         actual.sort_unstable();
-        assert_eq!(documented, actual);
+        for (file, doc) in [
+            ("docs/scripting-api.md", include_str!("../../docs/scripting-api.md")),
+            (
+                "skills/yio/references/scripting.md",
+                include_str!("../../skills/yio/references/scripting.md"),
+            ),
+        ] {
+            let mut documented: Vec<&str> = doc
+                .lines()
+                .filter_map(|line| line.strip_prefix("| `("))
+                .map(|call| call.split([' ', ')']).next().unwrap_or_default())
+                .collect();
+            documented.sort_unstable();
+            assert_eq!(documented, actual, "{file}");
+        }
     }
 
     /// The plugin that draws that table is the project's own demonstration,

@@ -38,6 +38,7 @@ A Rust crate (edition 2024) with no dependencies. It loads `yio.md` and the file
 | `docs/cache.md` | What is cached, how staleness is detected, the file format, measurements |
 | `yio.md` | The project's own tasks (build, test, lint, check, run, release) and its working example. Embeds `docs/yio.md` |
 | `docs/yio.md`, `docs/.yio/pre/0000_api.yio` | `yio docs search WORDS`, answered by a plugin that draws `docs/scripting-api.md` as a table, and `yio docs links` |
+| `skills/yio/` | An agent skill for writing `yio.md` files and plugins: `SKILL.md`, and `references/` for plugins and the scripting language. Self-contained, because it is installed outside this repository |
 | `README.md` | The introduction for users |
 | `.github/workflows/ci.yml` | Builds, tests, and lints on Linux, macOS, and Windows for pushes and pull requests |
 | `.github/workflows/release.yml` | On a `v*` tag, creates a GitHub release and attaches a binary archive per platform |
@@ -47,6 +48,7 @@ A Rust crate (edition 2024) with no dependencies. It loads `yio.md` and the file
 - **Keep the dependency tree as lean as possible.** Prefer `std` and a small amount of hand-written code over a crate. Adding any dependency (including dev/build deps and enabling non-default features) needs a stated justification and the user's sign-off. This applies to the Markdown parser, argument parser, and serialization for the cache.
 - **`docs/` holds design, implementation, and update docs.** Design decisions go there before or alongside the code that implements them. When behavior changes, update the relevant doc in the same change. Each doc has one subject; link to another doc instead of repeating it.
 - **Every keyword and built-in has a row in `docs/scripting-api.md`**, in a table row that starts with the call. A test fails when the document and the code disagree, and the example plugin reads those rows.
+- **`skills/yio/` describes the same behavior for readers who do not have `docs/`**, so it is the one place that repeats them. Update it in the same change as the format, the CLI rules, plugins, or a built-in. Tests fail when its scripting reference lacks a row for a keyword or built-in, and when a `yio.md` example in it stops loading.
 - Licensing is MIT OR Apache-2.0 (`LICENSE-MIT`, `LICENSE-APACHE`); new files and any vendored code must be compatible.
 - Do not guess on the items under [Open questions](#open-questions); ask.
 

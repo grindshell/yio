@@ -164,6 +164,7 @@ Call               Group           Gives
 (move from to)     Changing files  Moves a file or directory and gives the new path
 (remove path)      Changing files  Removes a file or an empty directory and gives ()
 ```
+
 ## The cache
 
 ```bash
@@ -184,6 +185,18 @@ With a cache, `yio` also warns when a script tests a boolean flag in a way that 
 The cache describes one machine's files, so add `.yio/cache.yio` to your `.gitignore`.
 
 How the cache decides what is out of date is in [docs/cache.md](docs/cache.md), and when plugins run in [docs/plugins.md](docs/plugins.md).
+
+## A skill for coding agents
+
+[skills/yio/](skills/yio/SKILL.md) teaches a coding agent such as Claude Code to write and maintain `yio.md` files and `.yio/` plugins: the format, what a script is given, the mistakes the loader rejects, and how to check its work with `yio` itself. It stands alone, so it works in projects that have never seen this repository.
+
+To use it everywhere, copy the directory into your agent's skills directory. For Claude Code:
+
+```bash
+cp -r skills/yio ~/.claude/skills/yio
+```
+
+It expects `yio` on your `PATH`.
 
 ## Development
 
