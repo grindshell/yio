@@ -1,8 +1,8 @@
 # Scripting language and cache: plan
 
-A plan. It covers the `.yio` scripting language, the `.yio/cache.yio` file, and `.yio/pre/` and `.yio/post/` plugins, because the three share one file format and one notion of "dirty".
+The `.yio` scripting language, the `.yio/cache.yio` file, and `.yio/pre/` and `.yio/post/` plugins, described together because the three share one file format and one notion of "dirty". This began as a plan and now describes what is built.
 
-**Status**: phases 1 to 6 are implemented. The reader is described under "Syntax", the evaluator under "Semantics", the built-ins and what they record under "Built-ins and tracking", plugins under "Plugins", and the cache file, its dirtiness check, and its lifecycle under "The cache". What remains is phase 7: built-ins that write files, and tuning.
+**Status**: all seven phases are implemented. The reader is described under "Syntax", the evaluator under "Semantics", the built-ins and what they record under "Built-ins and tracking", plugins under "Plugins", and the cache file, its dirtiness check, and its lifecycle under "The cache".
 
 Statements marked **Given** come from the project's design. Everything else is a proposal. The decisions that need an answer before the affected phase starts are collected at the end.
 
@@ -25,13 +25,35 @@ Measured again with the command tree cached (phase 2): the 500-command file goes
 
 Measured with script results cached (phase 6), using the design sketch's plugin: it lists a directory of lore files of about 1 KB each, reads every one for its status line, and draws a three-column table. Time for one `yio` run, table included:
 
-| Lore files | No cache | Cached |
+| Case | No cache | Cached |
 | --- | --- | --- |
-| 20 | 10.9 ms | 7.8 ms |
-| 200 | 35.9 ms | 12.6 ms |
-| 1000 | 136 ms | 34 ms |
+| 20 lore files | 10.4 ms | 7.5 ms |
+| 200 lore files | 33.0 ms | 8.4 ms |
+| 1000 lore files | 137.6 ms | 14.7 ms |
+| A project: 4 `yio.md` files, 6 `.yio` plugins, 300 notes | 48.9 ms | 10.6 ms |
 
-A cached run does not start the evaluator or read any lore file. What it still pays for is one `stat` per input, about 26 µs each on this Windows machine, plus drawing the table. Process startup is 6.3 ms of every figure.
+Process startup is about 6.5 ms of every figure. The project case embeds three directories, each with a `pre` plugin that draws a table of its notes and a `post` plugin that writes an index file.
+
+A cached run does not start the evaluator or read any of those files.
+
+### Where a cached run spends its time
+
+Measured on the project case (phase 7), by comparing runs that do more and less:
+
+| Part | Time |
+| --- | --- |
+| Starting the process | 6.5 ms |
+| Reading and parsing the cache file (27 KB), checking and decoding the command tree | 0.2 ms |
+| Checking the plugins' inputs and drawing their output | 3.9 ms |
+
+So the encoding is not what costs: decoding is a few tenths of a millisecond, and making it cleverer could not save more than that. What costs is one `stat` per input, about 25 µs each on this Windows machine.
+
+Two things were done about that:
+
+- An input that another already covers is not stored. A file that was both measured and read was being checked twice.
+- A unit with 64 or more inputs is checked on up to eight threads. With 1000 lore files this took a cached run from 34 ms to 14.7 ms.
+
+One thing was measured and deliberately not done. On Windows, listing a directory returns each entry's size and modification time without a `stat` per file, which would cut the cost several times over. But those figures come from the directory's own records, which lag behind for a file that is still open for writing and are not updated for a file changed through another hard link. A check built on them could call a changed file unchanged, which breaks the one promise the cache makes.
 
 ## The cache
 
@@ -75,6 +97,8 @@ Checking an input:
 Two seconds is the timestamp resolution of FAT, the coarsest file system worth supporting.
 
 When step 3 finds the content unchanged and the file is by now more than two seconds old, the cache is rewritten with the new modification time and a new as-of time, so later runs are back on the `stat`-only path.
+
+What a script changed is recorded the same way, as the state the change left behind: a file it wrote is recorded with the contents it wrote. See "Changing files".
 
 The hash is FNV-1a, about six lines of code and no dependency. It detects change; it is not a security boundary. The files are read anyway when the unit is first computed, so hashing them then is free.
 
@@ -287,7 +311,33 @@ A missing file or directory is an error for `list-dir`, `read-file`, and `file-s
 
 Deliberately absent: the clock, randomness, the network, and running other programs. Any of them makes a result impossible to replay. If one is ever needed it should mark the unit as never cached.
 
-Writing files (`write-file`, `make-dir`, `copy`, `move`, `remove`) is a later phase. A write is recorded as an output, and a unit is also dirty when one of its outputs is missing or changed, the way a build system treats targets.
+### Changing files
+
+| Call | Does | Gives | Records |
+| --- | --- | --- | --- |
+| `(write-file path contents)` | Makes a file hold a string or bytes, creating the directories above it | The path | The file with those contents |
+| `(make-dir path)` | Makes a directory and any missing ones above it | The path | That the path is a directory |
+| `(copy from to)` | Copies a file | The new path | The source's contents, and the copy's |
+| `(move from to)` | Moves a file or directory | The new path | That the old path is gone, and what the new one is |
+| `(remove path)` | Removes a file or an empty directory. A path already gone is fine. | `()` | That the path is gone |
+
+**Where.** A script may read anywhere but may change only what is inside the directory of its `yio.md`, and not that directory itself. An absolute path, or one that climbs out with `..`, is an error before anything is touched. `copy` may take its source from anywhere; both ends of a `move` must be inside. The rule looks at how the path is written, so a link inside the directory that points elsewhere is followed.
+
+**Nothing is removed recursively.** `remove` on a directory that has something in it is an error. A script that means to clear a directory lists it and removes each entry.
+
+**Unchanged files are left alone.** `write-file` does not rewrite a file that already holds exactly the contents asked for, so its modification time does not move and nothing that depends on it is disturbed.
+
+**With the cache.** A change is recorded as the state it left behind, and a script's result is reused only while that state still holds. So a script that has not been rerun has not had its changes redone, and does not need to: what it made is still there. If a file it wrote is deleted or edited by hand, the result is out of date, the script runs again, and the file is put back. This is how a build tool treats its targets.
+
+A script that changes something it looked at earlier in the same run invalidates its own observation, and so runs once more before it settles:
+
+```lisp
+(if (is-file "config.txt")
+  "kept"
+  (do (write-file "config.txt" "default") "created"))
+```
+
+The first run sees no file and makes one. Its record says "there was no `config.txt`", which is no longer true, so the next run is not replayed: it sees the file and records that instead. From then on it is replayed, until the file is deleted. A script that changes its own input on every run, such as one that appends to a file it reads, never settles and runs every time, which is what such a script needs.
 
 ## Plugins
 
@@ -368,12 +418,24 @@ Each phase ends with tests and its doc updated. Caching starts producing a file 
 | 4 | Built-ins and tracking (done) | The first set above, with input recording. `src/script/builtins.rs`. |
 | 5 | Plugins (done) | Discovery, ordering, the bash and `.yio` runners, rendering values, embedded directories. `src/plugin.rs`. |
 | 6 | Script result caching (done) | Script result units in the cache, replay on clean runs. The docs-table example runs end to end and is skipped when nothing changed. |
-| 7 | Writes and tuning | Write built-ins with output tracking; benchmark with realistic plugin sets before optimizing the encoding further. |
+| 7 | Writes and tuning (done) | Write built-ins with output tracking; benchmark with realistic plugin sets before optimizing the encoding further. |
 
-## Decisions needed
+## Decisions made
 
-Decided: the bytes literal is `#<length>:<bytes>`; "compressed" means a compact encoding; a dirty cache refreshes itself; `set` reassignment is allowed; a script's output is its final value; scripts may read files anywhere; `.bash` plugins run on every access; `post/` runs after `yio.md` is loaded.
+| Question | Decision |
+| --- | --- |
+| Bytes literal syntax | `#<length>:<bytes>` |
+| Does "compressed AST" mean a compact encoding or real compression? | A compact encoding |
+| Does a dirty cache refresh itself, or only on `--cache`? | It refreshes itself |
+| Is reassignment (`set`) allowed? | Yes |
+| Is a script's output its final value, rendered by `yio`? | Yes |
+| With a cache, do `.bash` plugins still run on every access? | Yes |
+| Does `post/` run after `yio.md` is loaded, or after the chosen command finishes? | After it is loaded |
+| May scripts read or write outside the directory of their `yio.md`? | Read anywhere, change only inside |
 
-| # | Question | Proposed | Blocks |
-| --- | --- | --- | --- |
-| 8 | May scripts write outside the directory tree of their `yio.md`? | No, write only inside | Phase 7 |
+## Not done
+
+- Removing a directory and its contents in one call.
+- Built-ins that would make a result impossible to replay: the clock, randomness, the network, running other programs.
+- Using a directory listing in place of per-file `stat` calls on Windows (see "Where a cached run spends its time").
+- `.yiorc`.

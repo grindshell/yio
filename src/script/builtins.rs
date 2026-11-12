@@ -40,6 +40,12 @@ static BUILTINS: &[Builtin] = &[
     Builtin { name: "is-file", call: |interp, args, pos| is_kind("is-file", PathKind::File, interp, args, pos) },
     Builtin { name: "is-dir", call: |interp, args, pos| is_kind("is-dir", PathKind::Dir, interp, args, pos) },
     Builtin { name: "env", call: env },
+    // Changes to the outside world. Each records the state it leaves.
+    Builtin { name: "write-file", call: write_file },
+    Builtin { name: "make-dir", call: make_dir },
+    Builtin { name: "copy", call: copy },
+    Builtin { name: "move", call: move_ },
+    Builtin { name: "remove", call: remove },
     // Paths, as text.
     Builtin { name: "path-join", call: path_join },
     Builtin { name: "base-name", call: base_name },
@@ -261,6 +267,121 @@ fn env(interp: &mut Interp, args: &[Value], pos: Pos) -> Result<Value, Error> {
     let (value, input) = input::env_var(string("env", &args[0], pos)?, interp.vars());
     interp.record(input);
     Ok(value.map_or_else(Value::nil, |value| Value::str(&value)))
+}
+
+/// How many directories below the script's own a path leads, or `None` if
+/// it leads outside: an absolute path, or one that climbs out with `..`.
+/// Zero is the script's directory itself.
+///
+/// This looks only at how the path is written. A link inside the directory
+/// that points elsewhere is followed.
+fn depth_inside(path: &str) -> Option<usize> {
+    use std::path::{Component, Path};
+    let mut depth = 0_usize;
+    for component in Path::new(path).components() {
+        match component {
+            Component::Prefix(_) | Component::RootDir => return None,
+            Component::CurDir => {}
+            Component::ParentDir => depth = depth.checked_sub(1)?,
+            Component::Normal(_) => depth += 1,
+        }
+    }
+    Some(depth)
+}
+
+/// Resolves a path a built-in is about to change. A script may read
+/// anywhere, but it may only change what is inside the directory of its
+/// `yio.md`, and never that directory itself.
+fn changeable(
+    name: &str,
+    interp: &Interp,
+    shown: &str,
+    pos: Pos,
+) -> Result<std::path::PathBuf, Error> {
+    match depth_inside(shown) {
+        Some(0) => Err(error(
+            pos,
+            format!("`{name}` cannot change the directory of its yio.md, only what is in it"),
+        )),
+        Some(_) => Ok(interp.resolve(shown)),
+        None => Err(error(
+            pos,
+            format!(
+                "`{name}` can only change what is inside the directory of its yio.md, \
+                 and `{shown}` is outside it"
+            ),
+        )),
+    }
+}
+
+/// `(write-file path contents)`: makes a file hold a string or bytes,
+/// creating the directories above it. Gives the path.
+fn write_file(interp: &mut Interp, args: &[Value], pos: Pos) -> Result<Value, Error> {
+    arity("write-file", args, 2, pos)?;
+    let shown = string("write-file", &args[0], pos)?;
+    let contents = match &args[1] {
+        Value::Str(text) => text.as_bytes(),
+        Value::Bytes(bytes) => bytes,
+        other => return Err(wrong("write-file", "a string or bytes", other, pos)),
+    };
+    let path = changeable("write-file", interp, shown, pos)?;
+    let written = input::write_file(&path, contents)
+        .map_err(|cause| error(pos, format!("could not write `{shown}`: {cause}")))?;
+    interp.record(written);
+    Ok(args[0].clone())
+}
+
+/// `(make-dir path)`: makes a directory and any missing ones above it.
+/// Gives the path.
+fn make_dir(interp: &mut Interp, args: &[Value], pos: Pos) -> Result<Value, Error> {
+    arity("make-dir", args, 1, pos)?;
+    let shown = string("make-dir", &args[0], pos)?;
+    let path = changeable("make-dir", interp, shown, pos)?;
+    let made = input::make_dir(&path)
+        .map_err(|cause| error(pos, format!("could not make `{shown}`: {cause}")))?;
+    interp.record(made);
+    Ok(args[0].clone())
+}
+
+/// `(copy from to)`: copies a file. The source may be anywhere. Gives the
+/// path of the copy.
+fn copy(interp: &mut Interp, args: &[Value], pos: Pos) -> Result<Value, Error> {
+    arity("copy", args, 2, pos)?;
+    let from = string("copy", &args[0], pos)?;
+    let to = string("copy", &args[1], pos)?;
+    let target = changeable("copy", interp, to, pos)?;
+    let (source, copied) = input::copy_file(&interp.resolve(from), &target)
+        .map_err(|cause| error(pos, format!("could not copy `{from}` to `{to}`: {cause}")))?;
+    interp.record(source);
+    interp.record(copied);
+    Ok(args[1].clone())
+}
+
+/// `(move from to)`: moves a file or directory. Both ends must be inside
+/// the script's directory. Gives the new path.
+fn move_(interp: &mut Interp, args: &[Value], pos: Pos) -> Result<Value, Error> {
+    arity("move", args, 2, pos)?;
+    let from = string("move", &args[0], pos)?;
+    let to = string("move", &args[1], pos)?;
+    let source = changeable("move", interp, from, pos)?;
+    let target = changeable("move", interp, to, pos)?;
+    let (left, arrived) = input::move_path(&source, &target)
+        .map_err(|cause| error(pos, format!("could not move `{from}` to `{to}`: {cause}")))?;
+    interp.record(left);
+    interp.record(arrived);
+    Ok(args[1].clone())
+}
+
+/// `(remove path)`: removes a file or an empty directory. A path that is
+/// already gone is fine.
+fn remove(interp: &mut Interp, args: &[Value], pos: Pos) -> Result<Value, Error> {
+    arity("remove", args, 1, pos)?;
+    let shown = string("remove", &args[0], pos)?;
+    let path = changeable("remove", interp, shown, pos)?;
+    let gone = input::remove(&path)
+        .map_err(|cause| error(pos, format!("could not remove `{shown}`: {cause}")))?;
+    interp.record(gone);
+    Ok(Value::nil())
 }
 
 /// `(path-join part...)`: joins with `/`. A part that starts with `/`
@@ -740,6 +861,108 @@ mod tests {
         std::fs::write(scratch.path("binary"), [0xff, 0xfe]).unwrap();
         let error = run(r#"(read-file "binary")"#, scratch.root()).err().unwrap();
         assert_eq!(error.to_string(), "1:1: `binary` is not valid UTF-8");
+    }
+
+    #[test]
+    fn writing_files_records_what_was_written() {
+        let scratch = Scratch::new("builtins-write");
+        let outcome = run_in(&scratch, r#"(write-file "out/index.md" "one\ntwo\n")"#);
+        assert_eq!(outcome.value, r#""out/index.md""#);
+        assert_eq!(std::fs::read_to_string(scratch.path("out/index.md")).unwrap(), "one\ntwo\n");
+        assert_eq!(inputs(&scratch, &outcome), ["file out/index.md"]);
+
+        // Bytes are written as they are.
+        run_in(&scratch, "(write-file \"raw.bin\" #3:\x00\x01\x02)");
+        assert_eq!(std::fs::read(scratch.path("raw.bin")).unwrap(), [0, 1, 2]);
+
+        // Writing and then reading the same file is one input.
+        let outcome = run_in(&scratch, r#"(read-file (write-file "note.txt" "hi"))"#);
+        assert_eq!(outcome.value, r#""hi""#);
+        assert_eq!(inputs(&scratch, &outcome), ["file note.txt"]);
+    }
+
+    #[test]
+    fn making_copying_moving_and_removing() {
+        let scratch = Scratch::new("builtins-change");
+        scratch.write("src.txt", "payload");
+
+        let outcome = run_in(&scratch, r#"(list (make-dir "a/b") (is-dir "a/b"))"#);
+        assert_eq!(outcome.value, r#"("a/b" true)"#);
+        assert_eq!(inputs(&scratch, &outcome), ["kind a/b Dir"]);
+
+        let outcome = run_in(&scratch, r#"(read-file (copy "src.txt" "a/copy.txt"))"#);
+        assert_eq!(outcome.value, r#""payload""#);
+        assert_eq!(inputs(&scratch, &outcome), ["file src.txt", "file a/copy.txt"]);
+
+        let outcome = run_in(&scratch, r#"(list (move "a/copy.txt" "c/moved.txt") (is-file "a/copy.txt"))"#);
+        assert_eq!(outcome.value, r#"("c/moved.txt" false)"#);
+        assert_eq!(inputs(&scratch, &outcome), ["kind a/copy.txt Missing", "kind c/moved.txt File"]);
+
+        let outcome = run_in(&scratch, r#"(list (remove "c/moved.txt") (remove "c/moved.txt") (remove "c"))"#);
+        assert_eq!(outcome.value, "(() () ())");
+        assert_eq!(inputs(&scratch, &outcome), ["kind c/moved.txt Missing", "kind c Missing"]);
+        assert!(!scratch.path("c").exists());
+    }
+
+    #[test]
+    fn changes_are_confined_to_the_scripts_directory() {
+        let scratch = Scratch::new("builtins-confine");
+        scratch.write("inside/a.txt", "a");
+        scratch.write("inside/sub/b.txt", "b");
+        let base = scratch.path("inside");
+        let attempt = |source: &str| run(source, &base).err().map(|error| error.to_string());
+        let outside = |name: &str, path: &str| {
+            Some(format!(
+                "1:1: `{name}` can only change what is inside the directory of its yio.md, and `{path}` is outside it"
+            ))
+        };
+
+        assert_eq!(attempt(r#"(write-file "../escaped.txt" "x")"#), outside("write-file", "../escaped.txt"));
+        assert_eq!(attempt(r#"(write-file "sub/../../escaped.txt" "x")"#), outside("write-file", "sub/../../escaped.txt"));
+        assert_eq!(attempt(r#"(write-file "/escaped.txt" "x")"#), outside("write-file", "/escaped.txt"));
+        assert_eq!(attempt(r#"(make-dir "../made")"#), outside("make-dir", "../made"));
+        assert_eq!(attempt(r#"(remove "../inside/a.txt")"#), outside("remove", "../inside/a.txt"));
+        assert_eq!(attempt(r#"(copy "a.txt" "../copy.txt")"#), outside("copy", "../copy.txt"));
+        assert_eq!(attempt(r#"(move "a.txt" "../moved.txt")"#), outside("move", "../moved.txt"));
+        assert_eq!(attempt(r#"(move "../other.txt" "here.txt")"#), outside("move", "../other.txt"));
+
+        // The directory itself is off limits too.
+        let own = Some("1:1: `remove` cannot change the directory of its yio.md, only what is in it".to_string());
+        assert_eq!(attempt(r#"(remove "")"#), own);
+        assert_eq!(attempt(r#"(remove ".")"#), own);
+        assert_eq!(attempt(r#"(remove "sub/..")"#), own);
+
+        // Nothing above was carried out.
+        assert!(!scratch.path("escaped.txt").exists());
+        assert!(!scratch.path("made").exists());
+        assert!(scratch.path("inside/a.txt").exists());
+
+        // Staying inside is fine, including by way of `..`, and reading from
+        // outside is allowed.
+        scratch.write("outside.txt", "from outside");
+        assert_eq!(attempt(r#"(write-file "sub/../c.txt" "c")"#), None);
+        assert_eq!(attempt(r#"(copy "../outside.txt" "copied.txt")"#), None);
+        assert_eq!(std::fs::read_to_string(scratch.path("inside/copied.txt")).unwrap(), "from outside");
+    }
+
+    #[test]
+    fn failed_changes_name_the_path() {
+        let scratch = Scratch::new("builtins-change-fail");
+        scratch.write("dir/file.txt", "x");
+        for (source, expected) in [
+            (r#"(remove "dir")"#, "1:1: could not remove `dir`: "),
+            (r#"(copy "nope.txt" "copy.txt")"#, "1:1: could not copy `nope.txt` to `copy.txt`: "),
+            (r#"(move "nope.txt" "there.txt")"#, "1:1: could not move `nope.txt` to `there.txt`: "),
+            (r#"(write-file "dir" "x")"#, "1:1: could not write `dir`: "),
+            (r#"(make-dir "dir/file.txt")"#, "1:1: could not make `dir/file.txt`: "),
+        ] {
+            let error = run(source, scratch.root()).err().unwrap().to_string();
+            assert!(error.starts_with(expected), "{source} gave {error}");
+        }
+        assert_eq!(
+            failure(r#"(write-file "x" 5)"#),
+            "1:1: `write-file` needs a string or bytes, but was given an integer"
+        );
     }
 
     /// The script from the project's design sketch, with its elided parts

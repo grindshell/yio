@@ -8,7 +8,7 @@ The file format is heavily inspired by [`mask`](https://github.com/jacobdeichert
 
 ## Status
 
-A Rust crate (edition 2024) with no dependencies. The CLI scaffold exists: it loads `yio.md` and the files it embeds, resolves commands, arguments, and flags, lists commands, runs scripts with bash, runs `.yio/` plugins written in bash or the scripting language, and caches both the command tree and the results of scripting-language plugins. File-writing built-ins and `.yiorc` are design only. Check `docs/` and the code before assuming a feature exists.
+A Rust crate (edition 2024) with no dependencies. The CLI scaffold exists: it loads `yio.md` and the files it embeds, resolves commands, arguments, and flags, lists commands, runs scripts with bash, runs `.yio/` plugins written in bash or the scripting language, and caches both the command tree and the results of scripting-language plugins. `.yiorc` is design only. Check `docs/` and the code before assuming a feature exists.
 
 | File | Role |
 | --- | --- |
@@ -29,7 +29,7 @@ A Rust crate (edition 2024) with no dependencies. The CLI scaffold exists: it lo
 | `src/script/encode.rs` | A script's value as bytes, for the cache |
 | `docs/cli-parsing.md` | The parsing and running rules the above implement |
 | `docs/embedding.md` | How one `yio.md` embeds another |
-| `docs/scripting-language.md` | Plan for the scripting language, cache, and plugins. Everything but file-writing built-ins is implemented |
+| `docs/scripting-language.md` | The scripting language, cache, and plugins: syntax, built-ins, what is recorded, measurements, decisions |
 
 ## Repo rules
 
@@ -148,7 +148,9 @@ Two design constraints drive every decision about the language and its built-ins
 1. **Specialized for file manipulation.** It is not a general-purpose language.
 2. **Cacheable.** A non-dirty run must be able to replay its result nearly instantly with no recomputation. Built-ins need to be designed so their inputs (files, directories) can be tracked for dirtiness.
 
-Known syntax and built-ins, from the design sketch:
+The second constraint has a hard rule for anyone adding a built-in: it may look at or change the outside world only through `src/input.rs`, and must record what it saw or left behind with `Interp::record`. A built-in whose result cannot be replayed from recorded inputs (the clock, randomness, the network, running a program) does not belong in the language.
+
+The language is implemented. `docs/scripting-language.md` is the reference. The design sketch it grew from:
 
 ```lisp
 -- comments start with two dashes
@@ -177,11 +179,12 @@ Known syntax and built-ins, from the design sketch:
     (map lore-files read-status)))
 ```
 
-Also planned: text-manipulation built-ins for parsing file contents.
+Scripts may read files anywhere but change only what is inside the directory of their `yio.md`.
 
 ## Open questions
 
 Not yet decided. Ask rather than assume.
 
-- The scripting language decisions listed at the end of `docs/scripting-language.md`: reassignment, the script output model, how plugins interact with the cache, when `post/` runs, and where scripts may read and write.
 - Scope and format of `.yiorc`.
+
+The scripting language's design questions are settled; "Decisions made" in `docs/scripting-language.md` lists them.

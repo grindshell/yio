@@ -143,6 +143,70 @@ pub fn env_var(name: &str, vars: Vars) -> (Option<String>, Input) {
     (value, Input::Env { name: name.to_string(), hash })
 }
 
+// Changes. Each of these alters the outside world and hands back an input
+// describing the state it left behind. A result that made a change is
+// reusable only while that state still holds: if a file it wrote is edited
+// or deleted, the result is out of date and making it again puts the file
+// back, the way a build tool treats its targets.
+
+fn make_parent(path: &Path) -> io::Result<()> {
+    match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => fs::create_dir_all(parent),
+        _ => Ok(()),
+    }
+}
+
+/// Makes a file hold `contents`, creating the directories above it. A file
+/// that already holds exactly that is left untouched, so its modification
+/// time does not move and nothing that depends on it is disturbed.
+pub fn write_file(path: &Path, contents: &[u8]) -> io::Result<Input> {
+    let same_size = fs::metadata(path).is_ok_and(|found| found.len() == contents.len() as u64);
+    if !(same_size && fs::read(path).is_ok_and(|current| current == contents)) {
+        make_parent(path)?;
+        fs::write(path, contents)?;
+    }
+    let metadata = fs::metadata(path)?;
+    Ok(Input::File {
+        path: spell(path),
+        size: contents.len() as u64,
+        mtime: modified(&metadata),
+        hash: hash(contents),
+    })
+}
+
+/// Makes a directory and any missing directories above it.
+pub fn make_dir(path: &Path) -> io::Result<Input> {
+    fs::create_dir_all(path)?;
+    Ok(Input::Kind { path: spell(path), kind: PathKind::Dir })
+}
+
+/// Removes a file or an empty directory. A path that is already gone is
+/// fine. A directory with something in it is an error: nothing is removed
+/// recursively.
+pub fn remove(path: &Path) -> io::Result<Input> {
+    match fs::symlink_metadata(path) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+        Ok(found) if found.is_dir() => fs::remove_dir(path)?,
+        Ok(_) => fs::remove_file(path)?,
+    }
+    Ok(Input::Kind { path: spell(path), kind: PathKind::Missing })
+}
+
+/// Copies a file. Gives the inputs for the source and for the copy.
+pub fn copy_file(from: &Path, to: &Path) -> io::Result<(Input, Input)> {
+    let (contents, source) = read_file(from)?;
+    Ok((source, write_file(to, &contents)?))
+}
+
+/// Moves a file or directory, creating the directories above its new place.
+/// Gives the inputs for where it was and where it is now.
+pub fn move_path(from: &Path, to: &Path) -> io::Result<(Input, Input)> {
+    make_parent(to)?;
+    fs::rename(from, to)?;
+    Ok((Input::Kind { path: spell(from), kind: PathKind::Missing }, path_kind(to).1))
+}
+
 /// Drops inputs that another input already covers, so that checking them
 /// later costs less. A file whose contents were read cannot change size or
 /// stop being a file without its contents changing, so a `Size` or `Kind`
@@ -204,8 +268,8 @@ pub enum Freshness {
 pub fn check(inputs: &[Input], as_of: u64, now: u64, vars: Vars) -> Freshness {
     let mut current = Vec::with_capacity(inputs.len());
     let mut settle = false;
-    for input in inputs {
-        match verdict(input, as_of, vars) {
+    for (input, verdict) in inputs.iter().zip(verdicts(inputs, as_of, vars)) {
+        match verdict {
             Verdict::Clean => current.push(input.clone()),
             Verdict::Reread { input, mtime } => {
                 // Re-recording only helps once the time is old enough to
@@ -229,6 +293,49 @@ enum Verdict {
     /// contents were compared. Carries the input as it stands now.
     Reread { input: Input, mtime: u64 },
     Dirty,
+}
+
+/// Below this many inputs, checking them one after another is quicker than
+/// starting threads to share the work.
+const PARALLEL_FROM: usize = 64;
+
+/// Judges inputs, in order, stopping at the first that changed. The list
+/// may therefore be shorter than `inputs`, in which case it ends in `Dirty`.
+///
+/// Almost all of the time goes to one `stat` per input, so a long list is
+/// split across threads.
+fn verdicts(inputs: &[Input], as_of: u64, vars: Vars) -> Vec<Verdict> {
+    let judge = |part: &[Input]| {
+        let mut verdicts = Vec::with_capacity(part.len());
+        for input in part {
+            let verdict = verdict(input, as_of, vars);
+            let dirty = matches!(verdict, Verdict::Dirty);
+            verdicts.push(verdict);
+            if dirty {
+                break;
+            }
+        }
+        verdicts
+    };
+
+    let threads = std::thread::available_parallelism().map_or(1, |count| count.get()).min(8);
+    if inputs.len() < PARALLEL_FROM || threads < 2 {
+        return judge(inputs);
+    }
+    let share = inputs.len().div_ceil(threads);
+    std::thread::scope(|scope| {
+        let parts: Vec<_> = inputs.chunks(share).map(|part| scope.spawn(move || judge(part))).collect();
+        let mut all = Vec::with_capacity(inputs.len());
+        for part in parts {
+            let verdicts = part.join().unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+            let dirty = matches!(verdicts.last(), Some(Verdict::Dirty));
+            all.extend(verdicts);
+            if dirty {
+                break;
+            }
+        }
+        all
+    })
 }
 
 fn verdict(input: &Input, as_of: u64, vars: Vars) -> Verdict {
@@ -453,6 +560,128 @@ mod tests {
             let fresh = check(&[recorded], as_of, as_of + 100 * SECOND, &[]);
             assert_eq!(fresh, Freshness::Dirty, "round {round}");
         }
+    }
+
+    #[test]
+    fn writing_a_file_records_what_it_left_behind() {
+        let scratch = Scratch::new("input-write");
+        let path = scratch.path("out/deep/index.md");
+        let as_of = now();
+        let later = as_of + 100 * SECOND;
+        let written = write_file(&path, b"one").unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"one");
+        let fresh = || check(std::slice::from_ref(&written), as_of, later, &[]);
+        assert_ne!(fresh(), Freshness::Dirty);
+
+        // Edited by hand, or deleted: what was made is no longer there.
+        fs::write(&path, "two").unwrap();
+        assert_eq!(fresh(), Freshness::Dirty);
+        fs::remove_file(&path).unwrap();
+        assert_eq!(fresh(), Freshness::Dirty);
+    }
+
+    #[test]
+    fn writing_the_same_contents_leaves_the_file_alone() {
+        let scratch = Scratch::new("input-rewrite");
+        let path = scratch.write("index.md", "same");
+        set_mtime(&path, THEN);
+        let Input::File { mtime, .. } = write_file(&path, b"same").unwrap() else { unreachable!() };
+        assert_eq!(mtime, THEN);
+        // Different contents of the same length are still written.
+        let Input::File { mtime, .. } = write_file(&path, b"diff").unwrap() else { unreachable!() };
+        assert_ne!(mtime, THEN);
+        assert_eq!(fs::read(&path).unwrap(), b"diff");
+    }
+
+    #[test]
+    fn making_and_removing_record_the_state_they_leave() {
+        let scratch = Scratch::new("input-make-remove");
+        let dir = scratch.path("a/b");
+        let made = make_dir(&dir).unwrap();
+        assert_eq!(made, make_dir(&dir).unwrap());
+        assert_eq!(check(std::slice::from_ref(&made), 0, 0, &[]), Freshness::Clean);
+
+        let file = scratch.write("a/b/file", "x");
+        // A directory with something in it is not removed.
+        assert!(remove(&dir).is_err());
+        let gone = remove(&file).unwrap();
+        assert!(!file.exists());
+        assert_eq!(check(std::slice::from_ref(&gone), 0, 0, &[]), Freshness::Clean);
+        // Removing what is already gone is fine.
+        assert_eq!(remove(&file).unwrap(), gone);
+
+        // An empty directory can be removed, and then making it no longer
+        // holds.
+        remove(&dir).unwrap();
+        assert!(!dir.exists());
+        assert_eq!(check(&[made], 0, 0, &[]), Freshness::Dirty);
+
+        // If what was removed comes back, the removal no longer holds.
+        scratch.write("a/b/file", "back");
+        assert_eq!(check(&[gone], 0, 0, &[]), Freshness::Dirty);
+    }
+
+    #[test]
+    fn copying_and_moving_record_both_ends() {
+        let scratch = Scratch::new("input-copy-move");
+        let from = scratch.write("from.txt", "payload");
+        let to = scratch.path("made/to.txt");
+
+        let (source, copy) = copy_file(&from, &to).unwrap();
+        assert_eq!(fs::read(&to).unwrap(), b"payload");
+        assert!(matches!(source, Input::File { size: 7, .. }));
+        assert!(matches!(copy, Input::File { size: 7, .. }));
+        assert!(copy_file(&scratch.path("missing"), &to).is_err());
+
+        let moved = scratch.path("moved/there.txt");
+        let (left, arrived) = move_path(&to, &moved).unwrap();
+        assert!(!to.exists());
+        assert_eq!(fs::read(&moved).unwrap(), b"payload");
+        assert!(matches!(left, Input::Kind { kind: PathKind::Missing, .. }));
+        assert!(matches!(arrived, Input::Kind { kind: PathKind::File, .. }));
+        assert_eq!(check(&[left, arrived], 0, 0, &[]), Freshness::Clean);
+        // There is nothing left to move a second time.
+        assert!(move_path(&to, &moved).is_err());
+    }
+
+    #[test]
+    fn a_long_list_of_inputs_is_judged_the_same_as_a_short_one() {
+        // Long enough to be split across threads.
+        let scratch = Scratch::new("input-many");
+        let count = PARALLEL_FROM * 3 + 5;
+        let mut recorded = Vec::new();
+        for i in 0..count {
+            recorded.push(file(&scratch, &format!("f{i:04}.txt"), &format!("contents {i}"), THEN).1);
+        }
+        let as_of = THEN + 10 * SECOND;
+        let now = as_of + 100 * SECOND;
+        assert_eq!(check(&recorded, as_of, now, &[]), Freshness::Clean);
+
+        // One touched file, wherever it is in the list, is noticed and the
+        // refreshed list keeps the original order.
+        for touched in [0, count / 2, count - 1] {
+            let path = scratch.path(&format!("f{touched:04}.txt"));
+            set_mtime(&path, THEN + 50 * SECOND);
+            let Freshness::Settled(current) = check(&recorded, as_of, now, &[]) else {
+                panic!("expected the touched file {touched} to settle");
+            };
+            assert_eq!(current.len(), count);
+            for (i, (before, after)) in recorded.iter().zip(&current).enumerate() {
+                assert_eq!(before == after, i != touched, "input {i}");
+            }
+            set_mtime(&path, THEN);
+        }
+
+        // One changed file anywhere makes the whole list dirty.
+        for changed in [0, count / 2, count - 1] {
+            let path = scratch.path(&format!("f{changed:04}.txt"));
+            let original = fs::read(&path).unwrap();
+            fs::write(&path, "something else entirely").unwrap();
+            assert_eq!(check(&recorded, as_of, now, &[]), Freshness::Dirty, "file {changed}");
+            fs::write(&path, original).unwrap();
+            set_mtime(&path, THEN);
+        }
+        assert_eq!(check(&recorded, as_of, now, &[]), Freshness::Clean);
     }
 
     #[test]

@@ -463,6 +463,84 @@ mod tests {
         assert_eq!(show_now().0, ran("rewritten\n"));
     }
 
+    /// Runs the first `pre` plugin against the given cache file contents,
+    /// as a run some seconds after `started` would. Gives what was shown,
+    /// whether it was replayed, and the cache file afterwards.
+    fn next_run(scratch: &Scratch, file: &[u8], started: u64) -> ((String, bool), Vec<u8>) {
+        let plugin = &discover(scratch.root(), Stage::Pre).unwrap()[0];
+        let session = Session::from_file(Some(file), false);
+        let plugins = Plugins::new(Builtins::default(), &session, started + 10 * SECOND);
+        let result = shown(&plugins, scratch.root(), plugin);
+        (result, session.contents())
+    }
+
+    #[test]
+    fn a_plugin_that_writes_runs_again_when_its_output_is_lost_or_edited() {
+        let scratch = Scratch::new("plugin-writes");
+        scratch.write("lore/a.md", "x");
+        scratch.write(
+            ".yio/pre/1_index.yio",
+            r#"(write-file "index.md" (join (list-dir "lore") "\n")) "indexed""#,
+        );
+        let index = scratch.path("index.md");
+        let started = input::now();
+        let empty = cache::serialize(&[]);
+
+        let (result, file) = next_run(&scratch, &empty, started);
+        assert_eq!(result, ran("indexed\n"));
+        assert_eq!(std::fs::read_to_string(&index).unwrap(), "lore/a.md");
+
+        // Nothing changed: not run, and the file it made is not rewritten.
+        crate::testing::set_mtime(&index, crate::testing::THEN);
+        let (result, file) = next_run(&scratch, &file, started);
+        assert_eq!(result, replayed("indexed\n"));
+        let modified = std::fs::metadata(&index).unwrap().modified().unwrap();
+        assert_eq!(modified, std::time::UNIX_EPOCH + std::time::Duration::from_nanos(crate::testing::THEN));
+
+        // Its output is deleted: it runs again and puts the file back.
+        std::fs::remove_file(&index).unwrap();
+        let (result, file) = next_run(&scratch, &file, started);
+        assert_eq!(result, ran("indexed\n"));
+        assert_eq!(std::fs::read_to_string(&index).unwrap(), "lore/a.md");
+
+        // Its output is edited by hand: the edit is replaced.
+        std::fs::write(&index, "scribbled over").unwrap();
+        let (result, file) = next_run(&scratch, &file, started);
+        assert_eq!(result, ran("indexed\n"));
+        assert_eq!(std::fs::read_to_string(&index).unwrap(), "lore/a.md");
+
+        // What it read changes: the output follows.
+        scratch.write("lore/b.md", "y");
+        let (result, file) = next_run(&scratch, &file, started);
+        assert_eq!(result, ran("indexed\n"));
+        assert_eq!(std::fs::read_to_string(&index).unwrap(), "lore/a.md\nlore/b.md");
+        assert_eq!(next_run(&scratch, &file, started).0, replayed("indexed\n"));
+    }
+
+    #[test]
+    fn a_plugin_that_changes_what_it_looked_at_settles_after_one_more_run() {
+        let scratch = Scratch::new("plugin-settles");
+        scratch.write(
+            ".yio/pre/1_default.yio",
+            r#"(if (is-file "config.txt") "kept" (do (write-file "config.txt" "default") "created"))"#,
+        );
+        let started = input::now();
+        let empty = cache::serialize(&[]);
+
+        let (result, file) = next_run(&scratch, &empty, started);
+        assert_eq!(result, ran("created\n"));
+        // It saw no file and then made one, so what it saw no longer holds.
+        let (result, file) = next_run(&scratch, &file, started);
+        assert_eq!(result, ran("kept\n"));
+        // Now what it saw is how things are.
+        let (result, file) = next_run(&scratch, &file, started);
+        assert_eq!(result, replayed("kept\n"));
+
+        // Deleting the file starts it over.
+        std::fs::remove_file(scratch.path("config.txt")).unwrap();
+        assert_eq!(next_run(&scratch, &file, started).0, ran("created\n"));
+    }
+
     #[test]
     fn a_stored_value_is_not_reused_under_different_variables() {
         let scratch = Scratch::new("plugin-replay-vars");

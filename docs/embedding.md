@@ -48,7 +48,10 @@ yio: docs/yio.md: line 12: flag `JOBS` is missing its `flags` option
 - A file may not embed itself, directly or through other files. Files are compared by path after resolving `.` and `..`, without consulting the file system.
 - Embeds may nest at most 32 files deep. That limit only exists to stop loops that paths cannot reveal, such as a symlink pointing at a parent directory.
 
+## Plugins and the cache
+
+An embedded directory's `.yio/pre/` and `.yio/post/` plugins run when its `yio.md` is embedded, in that directory. The cache of the directory `yio` was started in covers the embedded files and those plugins; the embedded directory's own `.yio/cache.yio` is only used when `yio` is run from there. See `scripting-language.md`.
+
 ## Not implemented
 
-- The embedded directory's `.yio/` plugins and cache. The design says plugins run whenever their `yio.md` is accessed, which will include being embedded.
 - Embedding part of a file (`docs/yio.md#section`).
