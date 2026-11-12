@@ -286,6 +286,35 @@ fn load(read: markdown::Read) -> Result<Option<Command>, String> {
 mod tests {
     use super::*;
 
+    /// The `yio.md` at the top of this repository is its working example,
+    /// so it has to load, and to pass the checks `yio --cache` would make.
+    #[test]
+    fn the_projects_own_yio_md_loads_cleanly() {
+        let top = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let read = |path: &Path, _: &[String]| Ok(std::fs::read_to_string(top.join(path))?);
+        let source = std::fs::read_to_string(top.join(FILE)).unwrap();
+        let root = markdown::load(Path::new(FILE), &source, &read).unwrap();
+
+        let names = |command: &Command| -> Vec<String> {
+            command.subcommands.iter().map(|sub| sub.name.clone()).collect()
+        };
+        assert_eq!(names(&root), ["build", "test", "lint", "check", "run", "release", "docs"]);
+        let docs = root.subcommands.last().unwrap();
+        assert_eq!(names(docs), ["search", "links"]);
+        // Every command there is to run has something to run and says
+        // what it is for.
+        fn each(command: &Command, visit: &mut dyn FnMut(&Command)) {
+            visit(command);
+            command.subcommands.iter().for_each(|sub| each(sub, visit));
+        }
+        each(&root, &mut |command| {
+            assert!(command.short_help.is_some(), "`{}` has no short help", command.name);
+            let runs = !command.scripts.is_empty() || !command.subcommands.is_empty();
+            assert!(runs, "`{}` has nothing to run", command.name);
+            assert_eq!(check::booleans(command), [], "`{}`", command.name);
+        });
+    }
+
     #[test]
     fn a_tree_says_where_each_directory_is_embedded() {
         let files = [

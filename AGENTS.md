@@ -36,7 +36,8 @@ A Rust crate (edition 2024) with no dependencies. It loads `yio.md` and the file
 | `docs/scripting-language.md` | Why the language is the way it is, how it is implemented, decisions |
 | `docs/plugins.md` | Which files are plugins, when they run, what they are told |
 | `docs/cache.md` | What is cached, how staleness is detected, the file format, measurements |
-| `docs/yio.md`, `docs/.yio/pre/0000_api.yio` | A working example: `yio search WORDS` in `docs/`, answered by a plugin that draws `docs/scripting-api.md` as a table |
+| `yio.md` | The project's own tasks (build, test, lint, check, run, release) and its working example. Embeds `docs/yio.md` |
+| `docs/yio.md`, `docs/.yio/pre/0000_api.yio` | `yio docs search WORDS`, answered by a plugin that draws `docs/scripting-api.md` as a table, and `yio docs links` |
 | `README.md` | The introduction for users |
 | `.github/workflows/ci.yml` | Builds, tests, and lints on Linux, macOS, and Windows for pushes and pull requests |
 | `.github/workflows/release.yml` | On a `v*` tag, creates a GitHub release and attaches a binary archive per platform |
@@ -56,6 +57,8 @@ cargo build
 cargo test
 cargo run -- <args>
 ```
+
+The same are in `yio.md`, for when `yio` is installed: `yio build`, `yio test`, `yio run -- <args>`, and `yio check` for all of what CI does. A test fails if that file stops loading or its scripts misuse a boolean, so keep it working when the format changes.
 
 CI fails on any clippy warning, so run this before pushing:
 

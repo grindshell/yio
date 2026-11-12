@@ -185,6 +185,21 @@ How the cache decides what is out of date is in [docs/cache.md](docs/cache.md), 
 
 ## Development
 
+The repository has a [yio.md](yio.md) of its own, which is also the fullest example of one. With `yio` installed:
+
+| Command | Does |
+| --- | --- |
+| `yio build` | Builds the binary. `--release` for an optimized one. |
+| `yio test` | Runs the tests. `yio test markdown cache` runs only those. |
+| `yio lint` | Runs clippy as CI does. |
+| `yio check` | Does everything CI does. |
+| `yio run -- --version` | Runs `yio` from source with the arguments given. |
+| `yio release 0.2.0` | Tags a version, which starts a release once pushed. |
+| `yio docs search file` | Shows the scripting API calls that mention a word. |
+| `yio docs links` | Checks the links between the docs. |
+
+Without it, the two that matter are:
+
 ```bash
 cargo test
 ```
