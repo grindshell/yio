@@ -3,15 +3,65 @@
 //! This is a line-based reader for the subset of Markdown that `yio.md` uses,
 //! not a general Markdown parser.
 
+use std::io;
+use std::path::{Component, Path, PathBuf};
+
 use crate::command::{
     Command, Flag, FlagType, Param, check_var_name, is_boolean, same_ignoring_case,
 };
 
-/// Parses the contents of a `yio.md` file. Error messages start with the
-/// 1-based line number.
+pub const FILE_NAME: &str = "yio.md";
+
+/// How deep embeds may nest. Cycles are caught by path, so this only stops
+/// loops that paths cannot reveal, such as a symlink to a parent directory.
+const MAX_DEPTH: usize = 32;
+
+/// Reads a file to embed. Paths are relative to the current directory.
+pub type Read<'r> = &'r dyn Fn(&Path) -> io::Result<String>;
+
+/// Loads the `yio.md` at `file`, whose contents are `source`, along with
+/// every file it embeds. Error messages name the file and 1-based line.
+pub fn load(file: &Path, source: &str, read: Read) -> Result<Command, String> {
+    let mut open = vec![normalize(file)];
+    load_source(source, &mut open, read)
+}
+
+/// Loads a single file with nothing available to embed.
+#[cfg(test)]
 pub fn parse(source: &str) -> Result<Command, String> {
+    let read = |_: &Path| Err(io::Error::from(io::ErrorKind::NotFound));
+    load(Path::new(FILE_NAME), source, &read)
+}
+
+/// Loads the file at the top of `open`, the chain of files being loaded.
+fn load_source(source: &str, open: &mut Vec<PathBuf>, read: Read) -> Result<Command, String> {
+    let file = open.last().expect("the file being loaded is open").clone();
+    read_lines(source, &file, open, read).map_err(|error| match error {
+        Error::Line(line_no, message) => format!("{}: line {line_no}: {message}", show(&file)),
+        Error::Embedded(message) => message,
+    })
+}
+
+enum Error {
+    /// A problem in the file being read, at a 1-based line.
+    Line(usize, String),
+    /// A problem in an embedded file. The message already names that file.
+    Embedded(String),
+}
+
+fn err(line_no: usize, message: &str) -> Error {
+    Error::Line(line_no, message.to_string())
+}
+
+fn read_lines(
+    source: &str,
+    file: &Path,
+    open: &mut Vec<PathBuf>,
+    read: Read,
+) -> Result<Command, Error> {
     let lines: Vec<&str> = source.lines().collect();
-    let mut loader = Loader::new();
+    let dir = file.parent().map(Path::to_path_buf).unwrap_or_default();
+    let mut loader = Loader::new(dir, open, read);
     let mut i = 0;
     while i < lines.len() {
         let line_no = i + 1;
@@ -73,31 +123,71 @@ pub fn parse(source: &str) -> Result<Command, String> {
     Ok(loader.finish())
 }
 
-fn err(line_no: usize, message: &str) -> String {
-    format!("line {line_no}: {message}")
+/// A command whose heading is still in scope.
+struct Open {
+    level: usize,
+    command: Command,
+    /// Short and long help of an embedded file, used if the heading turns
+    /// out to have none of its own.
+    embedded_help: (Option<String>, Option<String>),
 }
 
-struct Loader<'a> {
-    /// Commands still open, with their heading level. The root is at level 1
-    /// and is always present.
-    stack: Vec<(usize, Command)>,
+impl Open {
+    fn new(level: usize, command: Command) -> Self {
+        Open { level, command, embedded_help: (None, None) }
+    }
+
+    fn close(self) -> Command {
+        let mut command = self.command;
+        let (short, long) = self.embedded_help;
+        command.short_help = command.short_help.or(short);
+        command.long_help = command.long_help.or(long);
+        command
+    }
+}
+
+struct Loader<'a, 'c> {
+    /// Commands still open. The root is at level 1 and is always present.
+    stack: Vec<Open>,
     paragraph: Vec<&'a str>,
     paragraph_line: usize,
     seen_h1: bool,
+    /// Directory of the file being read, relative to the current directory.
+    /// Empty for the current directory itself.
+    dir: PathBuf,
+    /// The chain of files being loaded, ending with the one being read.
+    open: &'c mut Vec<PathBuf>,
+    read: Read<'c>,
 }
 
-impl<'a> Loader<'a> {
-    fn new() -> Self {
-        Loader {
-            stack: vec![(1, Command::root())],
+impl<'a, 'c> Loader<'a, 'c> {
+    fn new(dir: PathBuf, open: &'c mut Vec<PathBuf>, read: Read<'c>) -> Self {
+        let mut loader = Loader {
+            stack: Vec::new(),
             paragraph: Vec::new(),
             paragraph_line: 0,
             seen_h1: false,
-        }
+            dir,
+            open,
+            read,
+        };
+        let root = loader.located(Command::root());
+        loader.stack.push(Open::new(1, root));
+        loader
+    }
+
+    /// Records which directory `command` was defined in.
+    fn located(&self, mut command: Command) -> Command {
+        command.dir = (!self.dir.as_os_str().is_empty()).then(|| self.dir.clone());
+        command
+    }
+
+    fn top(&mut self) -> &mut Open {
+        self.stack.last_mut().expect("root is always present")
     }
 
     fn current(&mut self) -> &mut Command {
-        &mut self.stack.last_mut().expect("root is always present").1
+        &mut self.top().command
     }
 
     fn in_command(&self) -> bool {
@@ -107,18 +197,59 @@ impl<'a> Loader<'a> {
     /// Closes every open command at `level` or deeper, attaching each to the
     /// nearest shallower heading.
     fn close_to(&mut self, level: usize) {
-        while self.stack.len() > 1 && self.stack[self.stack.len() - 1].0 >= level {
-            let (_, done) = self.stack.pop().expect("checked above");
+        while self.stack.len() > 1 && self.stack[self.stack.len() - 1].level >= level {
+            let done = self.stack.pop().expect("checked above").close();
             self.current().subcommands.push(done);
         }
     }
 
     fn finish(mut self) -> Command {
         self.close_to(0);
-        self.stack.pop().expect("root is always present").1
+        self.stack.pop().expect("root is always present").close()
     }
 
-    fn heading(&mut self, line_no: usize, level: usize, title: &str) -> Result<(), String> {
+    /// Loads the `yio.md` that `target` links to and places its commands
+    /// under the current one, as if they had been written here.
+    fn embed(&mut self, line_no: usize, target: &str) -> Result<(), Error> {
+        let file = normalize(&self.dir.join(target));
+        let shown = show(&file);
+        if self.open.contains(&file) {
+            return Err(err(
+                line_no,
+                &format!("`{shown}` is already being loaded; embeds cannot form a cycle"),
+            ));
+        }
+        if self.open.len() >= MAX_DEPTH {
+            return Err(err(
+                line_no,
+                &format!("embeds are nested more than {MAX_DEPTH} files deep"),
+            ));
+        }
+        let source = (self.read)(&file)
+            .map_err(|error| err(line_no, &format!("could not read `{shown}`: {error}")))?;
+
+        self.open.push(file);
+        let embedded = load_source(&source, self.open, self.read);
+        self.open.pop();
+        let embedded = embedded.map_err(Error::Embedded)?;
+
+        let top = self.top();
+        for command in embedded.subcommands {
+            if top.command.subcommands.iter().any(|c| c.name == command.name) {
+                return Err(err(
+                    line_no,
+                    &format!("command `{}` from `{shown}` is already defined here", command.name),
+                ));
+            }
+            top.command.subcommands.push(command);
+        }
+        let (short, long) = &mut top.embedded_help;
+        *short = short.take().or(embedded.short_help);
+        *long = long.take().or(embedded.long_help);
+        Ok(())
+    }
+
+    fn heading(&mut self, line_no: usize, level: usize, title: &str) -> Result<(), Error> {
         if level == 1 {
             if self.seen_h1 || self.in_command() {
                 return Err(err(
@@ -138,7 +269,8 @@ impl<'a> Loader<'a> {
                 &format!("command `{}` is defined twice", command.name),
             ));
         }
-        self.stack.push((level, command));
+        let command = self.located(command);
+        self.stack.push(Open::new(level, command));
         Ok(())
     }
 
@@ -159,18 +291,14 @@ impl<'a> Loader<'a> {
         self.paragraph.push(text);
     }
 
-    fn end_paragraph(&mut self) -> Result<(), String> {
+    fn end_paragraph(&mut self) -> Result<(), Error> {
         if self.paragraph.is_empty() {
             return Ok(());
         }
         let text = self.paragraph.join("\n");
         self.paragraph.clear();
         if let Some(target) = embed_target(&text) {
-            // TODO: load the linked yio.md in place (see AGENTS.md, "Embedding").
-            return Err(err(
-                self.paragraph_line,
-                &format!("embedding `{target}` is not implemented yet"),
-            ));
+            return self.embed(self.paragraph_line, target);
         }
         match &mut self.current().long_help {
             Some(help) => {
@@ -182,7 +310,7 @@ impl<'a> Loader<'a> {
         Ok(())
     }
 
-    fn script(&mut self, line_no: usize, fence: &Fence, body: &[&str]) -> Result<(), String> {
+    fn script(&mut self, line_no: usize, fence: &Fence, body: &[&str]) -> Result<(), Error> {
         if !self.in_command() {
             return Err(err(line_no, "code block is outside of a command"));
         }
@@ -207,7 +335,7 @@ impl<'a> Loader<'a> {
 
     /// Reads the list that follows a `**FLAGS**` marker, starting at
     /// `lines[i]`. Returns the index of the first line after the list.
-    fn flags(&mut self, marker_line: usize, lines: &[&str], mut i: usize) -> Result<usize, String> {
+    fn flags(&mut self, marker_line: usize, lines: &[&str], mut i: usize) -> Result<usize, Error> {
         if !self.in_command() {
             return Err(err(marker_line, "`**FLAGS**` is outside of a command"));
         }
@@ -278,7 +406,7 @@ struct FlagDraft {
 }
 
 impl FlagDraft {
-    fn new(line_no: usize, item: &str) -> Result<Self, String> {
+    fn new(line_no: usize, item: &str) -> Result<Self, Error> {
         let name = unquote(item);
         check_var_name(name).map_err(|message| err(line_no, &message))?;
         Ok(FlagDraft {
@@ -295,7 +423,7 @@ impl FlagDraft {
         })
     }
 
-    fn set(&mut self, line_no: usize, item: &str) -> Result<(), String> {
+    fn set(&mut self, line_no: usize, item: &str) -> Result<(), Error> {
         let (key, value) = item
             .split_once(':')
             .ok_or_else(|| err(line_no, &format!("expected `key: value`, found `{item}`")))?;
@@ -333,7 +461,7 @@ impl FlagDraft {
         Ok(())
     }
 
-    fn finish(self) -> Result<Flag, String> {
+    fn finish(self) -> Result<Flag, Error> {
         let name = &self.flag.name;
         if !self.has_flags {
             return Err(err(
@@ -524,16 +652,38 @@ fn is_thematic_break(text: &str) -> bool {
     }
 }
 
-/// If a paragraph is nothing but a relative link, returns the link target.
+/// If a paragraph is nothing but a relative link to a file named `yio.md`,
+/// returns the link target. A lone link to anything else, such as a README,
+/// is ordinary help text.
 fn embed_target(paragraph: &str) -> Option<&str> {
     let inner = paragraph.strip_prefix('[')?.strip_suffix(')')?;
     let (label, target) = inner.split_once("](")?;
     let lone = !label.contains(']') && !target.contains(['(', ')', ' ', '\n']);
-    let relative = !target.is_empty()
-        && !target.contains("://")
-        && !target.starts_with(['#', '/'])
-        && !target.starts_with("mailto:");
-    (lone && relative).then_some(target)
+    let relative = !target.contains("://") && !target.starts_with('/');
+    let named = target.rsplit('/').next() == Some(FILE_NAME);
+    (lone && relative && named).then_some(target)
+}
+
+/// Resolves `.` and `..` in a relative path without touching the file
+/// system, so that one file reached two ways compares equal.
+fn normalize(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        let after_name = matches!(out.components().next_back(), Some(Component::Normal(_)));
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir if after_name => {
+                out.pop();
+            }
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+/// A path as written in a `yio.md`, with forward slashes on every platform.
+fn show(path: &Path) -> String {
+    path.display().to_string().replace('\\', "/")
 }
 
 /// Strips one pair of surrounding backticks.
@@ -684,7 +834,7 @@ rm -rf out/
             ("## a (WSLENV)\n", "`WSLENV` is reserved"),
             ("## a\n**FLAGS**\n- wslenv\n  - flags: -w\n", "line 3: `wslenv` is reserved"),
             ("## a (1X)\n", "`1X` is not a valid name"),
-            ("## a\n\n[docs](docs/yio.md)\n", "line 3: embedding `docs/yio.md` is not implemented"),
+            ("## a\n\n[docs](docs/yio.md)\n", "yio.md: line 3: could not read `docs/yio.md`"),
         ];
         for (source, expected) in cases {
             let error = parse(source).unwrap_err();
@@ -742,8 +892,160 @@ echo shown
     }
 
     #[test]
-    fn links_inside_prose_are_not_embeds() {
-        let root = parse("## a\n\nSee [docs](docs/yio.md) for more.\n\n[site](https://example.com)\n").unwrap();
-        assert!(root.subcommands[0].long_help.is_some());
+    fn only_a_lone_relative_link_to_a_yio_md_embeds() {
+        let source = "\
+## a
+
+See [docs](docs/yio.md) for more.
+
+[site](https://example.com/yio.md)
+
+[readme](README.md)
+
+[rooted](/etc/yio.md)
+";
+        let root = parse(source).unwrap();
+        let help = root.subcommands[0].long_help.as_deref().unwrap();
+        assert_eq!(help.split("\n\n").count(), 4);
+    }
+
+    /// Loads the first of `files`, serving the rest by path for embedding.
+    fn load_files(files: &[(&str, &str)]) -> Result<Command, String> {
+        let read = |path: &Path| {
+            let wanted = show(path);
+            let found = files.iter().find(|(name, _)| *name == wanted);
+            found
+                .map(|(_, source)| source.to_string())
+                .ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))
+        };
+        load(Path::new(files[0].0), files[0].1, &read)
+    }
+
+    fn names(command: &Command) -> Vec<&str> {
+        command.subcommands.iter().map(|c| c.name.as_str()).collect()
+    }
+
+    #[test]
+    fn embedded_commands_nest_under_the_embedding_heading() {
+        let root = load_files(&[
+            ("yio.md", "## docs\n\n[docs](docs/yio.md)\n\n### local\n\n## other\n"),
+            ("docs/yio.md", "# Docs\n\n> Documentation tasks\n\nMore.\n\n## build (OUT)\n```\necho\n```\n### fast\n## serve\n"),
+        ])
+        .unwrap();
+        assert_eq!(names(&root), ["docs", "other"]);
+
+        let docs = &root.subcommands[0];
+        assert_eq!(names(docs), ["build", "serve", "local"]);
+        assert_eq!(docs.short_help.as_deref(), Some("Documentation tasks"));
+        assert_eq!(docs.long_help.as_deref(), Some("More."));
+        assert_eq!(docs.dir, None);
+
+        let build = &docs.subcommands[0];
+        assert_eq!(build.params[0].name, "OUT");
+        assert_eq!(build.scripts, ["echo\n"]);
+        assert_eq!(build.dir.as_deref(), Some(Path::new("docs")));
+        assert_eq!(build.subcommands[0].dir.as_deref(), Some(Path::new("docs")));
+        assert_eq!(docs.subcommands[2].dir, None);
+    }
+
+    #[test]
+    fn the_embedding_heading_keeps_its_own_help() {
+        let root = load_files(&[
+            ("yio.md", "## docs\n\n[docs](docs/yio.md)\n\n> Mine\n"),
+            ("docs/yio.md", "> Theirs\n\nTheir details.\n\n## build\n"),
+        ])
+        .unwrap();
+        let docs = &root.subcommands[0];
+        assert_eq!(docs.short_help.as_deref(), Some("Mine"));
+        assert_eq!(docs.long_help.as_deref(), Some("Their details."));
+    }
+
+    #[test]
+    fn embedding_under_the_h1_adds_top_level_commands() {
+        let root = load_files(&[
+            ("yio.md", "# Tasks\n\n[tools](tools/yio.md)\n\n## build\n"),
+            ("tools/yio.md", "## lint\n## fmt\n"),
+        ])
+        .unwrap();
+        assert_eq!(names(&root), ["lint", "fmt", "build"]);
+    }
+
+    #[test]
+    fn embedded_links_are_relative_to_their_own_file() {
+        let root = load_files(&[
+            ("yio.md", "## docs\n\n[docs](./docs/yio.md)\n"),
+            ("docs/yio.md", "## tools\n\n[tools](../tools/yio.md)\n\n## api\n\n[api](api/yio.md)\n"),
+            ("tools/yio.md", "## lint\n"),
+            ("docs/api/yio.md", "## gen\n"),
+        ])
+        .unwrap();
+        let docs = &root.subcommands[0];
+        let lint = &docs.subcommands[0].subcommands[0];
+        assert_eq!(lint.name, "lint");
+        assert_eq!(lint.dir.as_deref(), Some(Path::new("tools")));
+        let generate = &docs.subcommands[1].subcommands[0];
+        assert_eq!(generate.name, "gen");
+        assert_eq!(generate.dir.as_deref(), Some(Path::new("docs/api")));
+    }
+
+    #[test]
+    fn one_file_may_be_embedded_in_two_places() {
+        let root = load_files(&[
+            ("yio.md", "## a\n\n[x](shared/yio.md)\n\n## b\n\n[x](shared/yio.md)\n"),
+            ("shared/yio.md", "## run\n"),
+        ])
+        .unwrap();
+        assert_eq!(names(&root.subcommands[0]), ["run"]);
+        assert_eq!(names(&root.subcommands[1]), ["run"]);
+    }
+
+    #[test]
+    fn rejects_bad_embeds() {
+        let cases: [(&[(&str, &str)], &str); 5] = [
+            (
+                &[("yio.md", "## a\n\n[self](yio.md)\n")],
+                "yio.md: line 3: `yio.md` is already being loaded",
+            ),
+            (
+                &[
+                    ("yio.md", "## a\n\n[docs](docs/yio.md)\n"),
+                    ("docs/yio.md", "## b\n\n[back](../yio.md)\n"),
+                ],
+                "docs/yio.md: line 3: `yio.md` is already being loaded",
+            ),
+            (
+                &[
+                    ("yio.md", "## a\n\n[docs](docs/yio.md)\n"),
+                    ("docs/yio.md", "## b\n```json\n{}\n```\n"),
+                ],
+                "docs/yio.md: line 2: code block language `json`",
+            ),
+            (
+                &[("yio.md", "## a\n\n[docs](docs/yio.md)\n")],
+                "yio.md: line 3: could not read `docs/yio.md`",
+            ),
+            (
+                &[
+                    ("yio.md", "## a\n\n[docs](docs/yio.md)\n\n[more](more/yio.md)\n"),
+                    ("docs/yio.md", "## build\n"),
+                    ("more/yio.md", "## build\n"),
+                ],
+                "yio.md: line 5: command `build` from `more/yio.md` is already defined here",
+            ),
+        ];
+        for (files, expected) in cases {
+            let error = load_files(files).unwrap_err();
+            assert!(error.starts_with(expected), "expected {expected:?}, got {error:?}");
+        }
+    }
+
+    #[test]
+    fn a_heading_cannot_redefine_an_embedded_command() {
+        let error = load_files(&[
+            ("yio.md", "## a\n\n[docs](docs/yio.md)\n\n### build\n"),
+            ("docs/yio.md", "## build\n"),
+        ])
+        .unwrap_err();
+        assert_eq!(error, "yio.md: line 5: command `build` is defined twice");
     }
 }

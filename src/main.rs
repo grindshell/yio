@@ -5,11 +5,12 @@ mod markdown;
 mod run;
 
 use std::io::ErrorKind;
+use std::path::Path;
 use std::process::ExitCode;
 
 use command::Command;
+use markdown::FILE_NAME as FILE;
 
-const FILE: &str = "yio.md";
 const ABOUT: &str = "Y I Oughta: a task runner for bash. Commands come from the yio.md in the current directory.";
 
 fn main() -> ExitCode {
@@ -33,7 +34,9 @@ fn run() -> Result<ExitCode, String> {
     // Without a yio.md there are no commands, but `--help` and `--version`
     // still describe the CLI itself.
     let root = match &source {
-        Some(source) => markdown::parse(source).map_err(|error| format!("{FILE}: {error}"))?,
+        Some(source) => markdown::load(Path::new(FILE), source, &|path| {
+            std::fs::read_to_string(path)
+        })?,
         None => Command {
             short_help: Some(ABOUT.to_string()),
             ..Command::root()
@@ -72,6 +75,6 @@ fn run() -> Result<ExitCode, String> {
     if command.scripts.is_empty() {
         describe()
     } else {
-        run::run(&command.scripts, &invocation.env())
+        run::run(&command.scripts, &invocation.env(), command.dir.as_deref())
     }
 }

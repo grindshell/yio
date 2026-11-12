@@ -1,5 +1,7 @@
 //! The command tree a `yio.md` file is interpreted into.
 
+use std::path::PathBuf;
+
 /// One command. The root of the tree is the file itself; its subcommands are
 /// the H2 headings, theirs the H3 headings, and so on.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -15,6 +17,10 @@ pub struct Command {
     /// A command without any only groups subcommands.
     pub scripts: Vec<String>,
     pub subcommands: Vec<Command>,
+    /// Directory of the `yio.md` that defines the command, relative to the
+    /// current directory, and where its scripts run. `None` for the current
+    /// directory; set for commands that come from an embedded file.
+    pub dir: Option<PathBuf>,
 }
 
 impl Command {

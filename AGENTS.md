@@ -8,16 +8,17 @@ The file format is heavily inspired by [`mask`](https://github.com/jacobdeichert
 
 ## Status
 
-A Rust crate (edition 2024) with no dependencies. The CLI scaffold exists: it loads `yio.md`, resolves commands, arguments, and flags, lists commands, and runs scripts with bash. Embedding, the cache, `.yio/` plugins, the scripting language, and `.yiorc` are design only. Check `docs/` and the code before assuming a feature exists.
+A Rust crate (edition 2024) with no dependencies. The CLI scaffold exists: it loads `yio.md` and the files it embeds, resolves commands, arguments, and flags, lists commands, and runs scripts with bash. The cache, `.yio/` plugins, the scripting language, and `.yiorc` are design only. Check `docs/` and the code before assuming a feature exists.
 
 | File | Role |
 | --- | --- |
 | `src/command.rs` | The command tree and the built-in flags |
-| `src/markdown.rs` | `yio.md` to command tree |
+| `src/markdown.rs` | `yio.md` to command tree, including embeds |
 | `src/cli.rs` | Command-line arguments to a resolved command and its values |
 | `src/help.rs` | Command listings |
 | `src/run.rs` | Runs a script with bash |
-| `docs/cli-parsing.md` | The parsing rules the above implement |
+| `docs/cli-parsing.md` | The parsing and running rules the above implement |
+| `docs/embedding.md` | How one `yio.md` embeds another |
 
 ## Repo rules
 
@@ -43,7 +44,7 @@ cargo run -- <args>
 - **Positional arguments**: `(MY_ARGUMENT_NAME)` in the heading. Required.
 - **Optional arguments**: `[MY_ARGUMENT_NAME]` in the heading. The script decides whether the variable holds a value.
 - **Named flags**: a paragraph containing `**FLAGS**`, immediately followed (newline optional) by a `-` delimited list. Each top-level item is one flag. Sub-items configure it with the keys `flags`, `type`, `default`, and `description`. Only `flags` is mandatory, the type defaults to string, and flags may have default values (unlike `mask`).
-- **Embedding**: when a relative link is the only content of a heading's paragraph, the linked `yio.md` is loaded in place as part of the same run. No second `yio` process is spawned.
+- **Embedding**: when a relative link to a file named `yio.md` is the only content of a heading's paragraph, that file is loaded in place as part of the same run and its commands nest under the heading. No second `yio` process is spawned. Embedded scripts run in their own file's directory. See `docs/embedding.md`.
 
 Arguments and flags are injected into the script's environment under the name exactly as written. There is no automatic case conversion. Because Windows environment names are case-insensitive, names within one command must be unique ignoring case.
 

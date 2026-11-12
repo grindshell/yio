@@ -4,7 +4,7 @@ How `yio` turns a `yio.md` file and a command line into a script to run. This de
 
 ## Pipeline
 
-1. `markdown.rs` reads `yio.md` from the current directory into a `Command` tree (`command.rs`). The root is the file; H2 headings are its subcommands, deeper headings nest under the nearest shallower one.
+1. `markdown.rs` reads `yio.md` from the current directory into a `Command` tree (`command.rs`). The root is the file; H2 headings are its subcommands, deeper headings nest under the nearest shallower one. Files it embeds are loaded into the same tree (see `embedding.md`).
 2. `cli.rs` walks the arguments against that tree and produces an `Invocation`: the resolved command, the built-in flags that were passed, and a value for every argument and flag of that command.
 3. `main.rs` acts on it. A command with code blocks is run by `run.rs`; a command without one is described by `help.rs`. `yio` with no arguments resolves to the root, which never has a script, so it lists the top-level commands.
 
@@ -40,6 +40,10 @@ A command with no code block has nothing to run, so naming it prints the same de
 ## Running
 
 The bash that runs is the first one on `PATH`. On Windows `yio` searches `PATH` for `bash.exe` itself, because the standard library looks in the system directories first and would pick the WSL launcher in System32 over a bash that comes earlier on `PATH`.
+
+That launcher (`C:\Windows\System32\bash.exe`) does not pass its arguments to bash unchanged. It sends the rest of its command line through a shell inside WSL, so a script given as an ordinary `-c` argument is expanded twice: `echo '$HOME'` prints a path and `awk '{print $2}'` loses its `$2`. When the bash found is in the system directory, `yio` writes the script onto the command line itself as one single-quoted shell word, which that first shell leaves alone. Every other bash gets the script as a normal argument.
+
+Scripts run in the directory of the `yio.md` that defines them, which matters for embedded files (see `embedding.md`).
 
 Each code block of a command runs as its own `bash -c` process, in the order written. They share the injected variables and nothing else: shell variables, options, and the working directory set by one block do not reach the next. The first block that exits non-zero stops the run, and its exit code becomes `yio`'s.
 
@@ -86,11 +90,10 @@ Names are injected exactly as written, but Windows treats environment variable n
 - An HTML comment that starts a line (`<!--`) hides everything through the line containing `-->`, so a commented-out code block or heading is ignored. A comment that is never closed is an error.
 - `**FLAGS**` on its own line, then a list. Options are `flags` (required), `type` (`string` or `boolean`), `default`, and `description`. Values may be wrapped in backticks.
 
-Errors name the line: `yio.md: line 12: flag `JOBS` is missing its `flags` option`.
+Errors name the file and line: `yio.md: line 12: flag `JOBS` is missing its `flags` option`.
 
 ## Not implemented
 
-- Embedding another `yio.md` through a link-only paragraph. The loader detects it and reports an error.
 - `--cache` and `--remove-cache`. They parse, and using both is an error, but neither does anything yet.
 - `.yio/` plugins and the scripting language.
 - Type-checking boolean variables inside scripts.
