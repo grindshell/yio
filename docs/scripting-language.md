@@ -2,7 +2,7 @@
 
 A plan. It covers the `.yio` scripting language, the `.yio/cache.yio` file, and `.yio/pre/` and `.yio/post/` plugins, because the three share one file format and one notion of "dirty".
 
-**Status**: phases 1 and 2 are implemented. The reader is described under "Syntax", and the cache file, its dirtiness check, and its lifecycle under "The cache", which holds the command tree only. Script evaluation, built-ins, plugins, and script result caching do not exist yet. Outside tests, nothing calls the reader until phase 3.
+**Status**: phases 1 to 3 are implemented. The reader is described under "Syntax", the evaluator under "Semantics", and the cache file, its dirtiness check, and its lifecycle under "The cache", which holds the command tree only. Built-ins that read files, plugins, and script result caching do not exist yet, so `yio` itself does not run scripts: outside tests, nothing calls the reader or the evaluator until phase 5.
 
 Statements marked **Given** come from the project's design. Everything else is a proposal. The decisions that need an answer before the affected phase starts are collected at the end.
 
@@ -138,15 +138,35 @@ The nesting limit exists because everything that walks forms afterwards recurses
 - `()` is the empty value.
 - Built-ins `list-dir`, `is-empty`, `map` (lists only), and the UI built-ins `col` and `col-def`.
 
-### Proposed to fill the gaps
+### Semantics
 
+Implemented in `src/script/eval.rs`. A list is a call unless its first element is a keyword, and everything is an expression.
+
+| Form | Meaning |
+| --- | --- |
+| `(var name value)` | Declares a variable in the current scope. Declaring the same name twice in one scope is an error. |
+| `(set name value)` | Changes the nearest variable with that name. It must already exist. |
+| `(if cond then)`, `(if cond then else)` | Evaluates only the branch taken. Without an `else`, a false condition gives `()`. |
+| `(do expr...)` | Evaluates each expression and gives the last. It has its own scope. |
+| `(fn name (params...) body...)` | Defines a function and binds it to `name`. |
+| `(fn (params...) body...)` | Evaluates to an anonymous function. |
+| `return`, `(return)`, `(return value)` | Leaves the innermost function, or the script when used outside one. |
+| `(and a b ...)`, `(or a b ...)` | Stop at the first false or first true value and give it; otherwise give the last value. |
+| `(f args...)` | Evaluates `f`, then the arguments left to right, then calls. |
+
+- **Keywords** are `var`, `set`, `if`, `do`, `fn`, `return`, `and`, `or`. They cannot name a variable. A script may reuse a built-in's name for its own variable, but cannot `set` a built-in.
+- **The empty value**: `()` is the empty list. There is no separate "nothing". It is what `var`, `set`, a named `fn`, an empty body, and an `if` with no `else` evaluate to.
+- **Truthiness**: only `false` and `()` are false. `0` and `""` are true.
+- **Scope** is lexical. A function sees, and can change, the variables where it was defined, and two functions from the same place share them. `do`, function bodies, and the script itself each have a scope.
+- **Functions** check the number of arguments. Named functions can call themselves and each other.
+- **Integers** are 64-bit. Overflow and division by zero are errors, not wraparound. `/` truncates toward zero.
 - **No floats**: file work does not need them and they complicate stable encoding.
-- **Forms**: `(if cond then else)`, `(return expr)`, `(do expr...)` for more than one expression in a branch, `(set name expr)` to reassign a variable, `and`, `or`, `not`. The sketch's `(var output ())` followed by building `output` up implies reassignment, hence `set`.
-- **Truthiness**: only `()` and `false` are false. `0` and `""` are true.
-- **Scope**: lexical. Functions close over the variables where they are defined.
-- **Arithmetic and comparison**: `+ - * / %` on integers; `= < > <= >=`.
-- **No** macros, `eval`, imports, or loop forms. Iteration is `map`, `filter`, and recursion, with a depth limit.
-- **Errors** stop the script and report `path:line:column: message`.
+- **No** macros, `eval`, imports, or loop forms. Iteration is `map`, `filter`, and recursion.
+- **Errors** stop the script and report `line:column: message`, pointing at the call that failed.
+
+Evaluation nests at most 200 deep, counting each nested expression and each function call, so runaway recursion is an error rather than a crash. The limit is sized for the smallest stack `yio` runs on, the 1 MiB main thread on Windows: one level costs up to about 650 bytes in a release build and 3.6 KiB in a debug build. That allows roughly 60 to 200 recursive calls depending on how much each one nests, which is enough for walking directories but not for recursing over a long list; `map` and `filter` are for that. Raising it means running scripts on a thread with a larger stack, which is easiest to do when plugins are wired in (phase 5).
+
+The pure built-ins exist already: `+ - * / %`, `= < > <= >=`, `not`, `list`, and `is-empty`. `=` compares any two values structurally, and values of different kinds are simply unequal. The ordering operators take two integers or two strings.
 
 ### A script is a value
 
@@ -201,7 +221,7 @@ Each phase ends with tests and its doc updated. Caching starts producing a file 
 | --- | --- | --- |
 | 1 | Reader (done) | Bytes in, forms out, with positions for errors. Comments, strings, integers, symbols, lists, `()`, and the bytes literal. `src/script/reader.rs`. |
 | 2 | Cache file and command tree (done) | Encode and decode the payload, fingerprints, the dirtiness check, `--cache`, `--remove-cache`, loading from a clean cache. `src/cache.rs`. |
-| 3 | Evaluator | Values, scopes, the special forms, functions and closures, errors. No built-ins that touch the outside world. `src/script/eval.rs`. |
+| 3 | Evaluator (done) | Values, scopes, the special forms, functions and closures, errors. No built-ins that touch the outside world. `src/script/eval.rs`. |
 | 4 | Built-ins and tracking | The first set above, with input recording. `src/script/builtins.rs`. |
 | 5 | Plugins | Discovery, ordering, the bash and `.yio` runners, rendering values, embedded directories. `src/plugin.rs`. |
 | 6 | Script result caching | Script result units in the cache, replay on clean runs. The docs-table example runs end to end and is skipped when nothing changed. |
@@ -209,12 +229,10 @@ Each phase ends with tests and its doc updated. Caching starts producing a file 
 
 ## Decisions needed
 
-Decided: the bytes literal is `#<length>:<bytes>`; "compressed" means a compact encoding; a dirty cache refreshes itself.
+Decided: the bytes literal is `#<length>:<bytes>`; "compressed" means a compact encoding; a dirty cache refreshes itself; `set` reassignment is allowed; a script's output is its final value.
 
 | # | Question | Proposed | Blocks |
 | --- | --- | --- | --- |
-| 4 | Is reassignment (`set`) allowed? | Yes | Phase 3 |
-| 5 | Is a script's output its final value, rendered by `yio`? | Yes | Phase 3 |
 | 6 | With a valid cache, do `.bash` plugins still run on every access? | Yes | Phase 5 |
 | 7 | Does `post/` run after `yio.md` is loaded, or after the chosen command finishes? | After it is loaded | Phase 5 |
 | 8 | May scripts read or write outside the directory tree of their `yio.md`? | Read anywhere, write only inside | Phases 4 and 7 |

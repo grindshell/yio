@@ -4,8 +4,8 @@ mod command;
 mod help;
 mod markdown;
 mod run;
-// Outside tests, nothing calls the reader until scripts are evaluated
-// (phase 3 of docs/scripting-language.md). Remove this allowance then.
+// Outside tests, nothing runs a script until plugins exist (phase 5 of
+// docs/scripting-language.md). Remove this allowance then.
 #[allow(dead_code)]
 mod script;
 
