@@ -40,6 +40,7 @@ static BUILTINS: &[Builtin] = &[
     Builtin { name: "is-file", call: |interp, args, pos| is_kind("is-file", PathKind::File, interp, args, pos) },
     Builtin { name: "is-dir", call: |interp, args, pos| is_kind("is-dir", PathKind::Dir, interp, args, pos) },
     Builtin { name: "env", call: env },
+    Builtin { name: "args", call: told_args },
     // Changes to the outside world. Each records the state it leaves.
     Builtin { name: "write-file", call: write_file },
     Builtin { name: "make-dir", call: make_dir },
@@ -267,6 +268,15 @@ fn env(interp: &mut Interp, args: &[Value], pos: Pos) -> Result<Value, Error> {
     let (value, input) = input::env_var(string("env", &args[0], pos)?, interp.vars());
     interp.record(input);
     Ok(value.map_or_else(Value::nil, |value| Value::str(&value)))
+}
+
+/// `(args)`: the command-line arguments that are for the script's `yio.md`.
+fn told_args(interp: &mut Interp, args: &[Value], pos: Pos) -> Result<Value, Error> {
+    arity("args", args, 0, pos)?;
+    let (told, input) = input::args(interp.vars());
+    let told = told.iter().map(|arg| Value::str(arg)).collect();
+    interp.record(input);
+    Ok(Value::list(told))
 }
 
 /// How many directories below the script's own a path leads, or `None` if
@@ -628,7 +638,7 @@ mod tests {
     use std::path::Path;
 
     use super::BUILTINS;
-    use crate::input::{self, Freshness, Input};
+    use crate::input::{self, Freshness, Input, Vars};
     use crate::script;
     use crate::script::eval::KEYWORDS;
     use crate::testing::{SECOND, Scratch};
@@ -640,7 +650,7 @@ mod tests {
     }
 
     fn run(source: &str, base: &Path) -> Result<Ran, script::Error> {
-        script::run(source.as_bytes(), base, &[], |outcome| Ran {
+        script::run(source.as_bytes(), base, Vars::NONE, |outcome| Ran {
             value: outcome.value.to_string(),
             inputs: outcome.inputs,
         })
@@ -675,6 +685,7 @@ mod tests {
             Input::Kind { path, kind } => format!("kind {} {kind:?}", relative(path)),
             Input::Size { path, size } => format!("size {} {size}", relative(path)),
             Input::Env { name, hash } => format!("env {name} set={}", hash.is_some()),
+            Input::Args { .. } => "args".to_string(),
         }
     }
 
@@ -994,8 +1005,10 @@ mod tests {
     fn the_api_table_plugin_runs() {
         let docs = Path::new(env!("CARGO_MANIFEST_DIR")).join("docs");
         let source = include_bytes!("../../docs/.yio/pre/0000_api.yio");
-        let table = |filter: &str| {
-            script::run(source, &docs, &[("API", filter.to_string())], |outcome| {
+        let table = |line: &str| {
+            let args: Vec<String> = line.split_whitespace().map(String::from).collect();
+            let env = [("YIO_HELP", "false".to_string())];
+            script::run(source, &docs, Vars { env: &env, args: &args }, |outcome| {
                 outcome.value.to_string()
             })
             .unwrap_or_else(|error| panic!("the plugin failed: {error}"))
@@ -1003,21 +1016,29 @@ mod tests {
         let total = KEYWORDS.len() + BUILTINS.len();
 
         assert_eq!(
-            table("make-dir"),
+            table("search make-dir"),
             format!(
-                "(\"1 of {total} calls mention \\\"make-dir\\\"\" (col \
+                "(\"1 of {total} calls mention: make-dir\" (col \
                  (col-def \"Call\" (\"(make-dir path)\")) \
                  (col-def \"Group\" (\"Changing files\")) \
                  (col-def \"Gives\" (\"Makes a directory, and any missing above it, and gives the path\"))))"
             )
         );
-        assert!(table("").starts_with(&format!("(\"{total} of {total} calls mention")));
+        // Every word has to be mentioned.
+        let both = table("search file path");
+        assert!(both.contains("calls mention: file path") && both.contains("(read-file path)"));
+        assert!(!both.contains("(base-name path)") && !both.contains("(lines text)"));
+        assert!(table("search file path nope").starts_with("\"None of the "));
+        // With no words, every call is listed, under no heading.
+        assert!(table("search").starts_with("(() (col (col-def \"Call\" (\"(var name value)\" "));
         assert_eq!(
-            table("no such call"),
-            format!("\"None of the {total} calls mention \\\"no such call\\\"\"")
+            table("search no-such-call"),
+            format!("\"None of the {total} calls mention: no-such-call\"")
         );
+        // Any other command is none of its business.
+        assert_eq!(table(""), "()");
+        assert_eq!(table("build"), "()");
     }
-
     /// The script from the project's design sketch, with its elided parts
     /// filled in.
     const SKETCH: &str = r#"
@@ -1089,7 +1110,7 @@ mod tests {
         let as_of = input::now();
         let outcome = run_in(&scratch, SKETCH);
         let later = as_of + 100 * SECOND;
-        let fresh = || input::check(&outcome.inputs, as_of, later, &[]);
+        let fresh = || input::check(&outcome.inputs, as_of, later, Vars::NONE);
         assert_ne!(fresh(), Freshness::Dirty);
 
         // A file the script read changes.

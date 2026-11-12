@@ -402,14 +402,14 @@ mod tests {
 
     /// The value of a script, printed.
     fn value(source: &str) -> String {
-        match script::run(source.as_bytes(), Path::new(""), &[], |outcome| outcome.value.to_string()) {
+        match script::run(source.as_bytes(), Path::new(""), crate::input::Vars::NONE, |outcome| outcome.value.to_string()) {
             Ok(value) => value,
             Err(error) => panic!("{source}\nfailed: {error}"),
         }
     }
 
     fn failure(source: &str) -> String {
-        match script::run(source.as_bytes(), Path::new(""), &[], |outcome| outcome.value.to_string()) {
+        match script::run(source.as_bytes(), Path::new(""), crate::input::Vars::NONE, |outcome| outcome.value.to_string()) {
             Ok(value) => panic!("{source}\nshould fail but gave {value}"),
             Err(error) => error.to_string(),
         }

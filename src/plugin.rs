@@ -7,7 +7,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use crate::cache::{Session, Unit, UnitKind};
-use crate::cli::Builtins;
+use crate::cli::{self, Builtins};
 use crate::input::{self, Freshness, Input, Vars};
 use crate::run::{self, Script};
 use crate::script::{self, encode, render};
@@ -117,14 +117,17 @@ pub struct Ran {
     pub value: Option<Vec<u8>>,
 }
 
-/// Runs one plugin of the `yio.md` in `dir`.
+/// Runs one plugin of the `yio.md` in `dir`. `vars` is what it is told
+/// about the run: a bash plugin gets the variables in its environment and
+/// the arguments as `$1`, `$2`, and so on; a `.yio` plugin reads them with
+/// `env` and `args`.
 pub fn run(dir: &Path, stage: Stage, plugin: &Plugin, vars: Vars) -> Result<Ran, String> {
     let relative = format!(".yio/{}/{}", stage.name(), plugin.file);
     let shown = show(&dir.join(&relative));
     match plugin.kind {
         Kind::Bash => {
             let dir = (!dir.as_os_str().is_empty()).then_some(dir);
-            match run::run_one(Script::File(&relative), vars, dir)? {
+            match run::run_one(Script::File(&relative, vars.args), vars.env, dir)? {
                 0 => Ok(Ran { text: String::new(), inputs: Vec::new(), value: None }),
                 code => Err(format!("plugin `{shown}` failed with exit code {code}")),
             }
@@ -154,9 +157,12 @@ pub struct Plugins<'a> {
     enabled: bool,
     verbose: bool,
     /// The `YIO_*` variables plugins see.
-    vars: Vec<(&'static str, String)>,
-    /// Directories whose `pre` plugins have run, in that order.
-    visited: RefCell<Vec<PathBuf>>,
+    env: Vec<(&'static str, String)>,
+    /// The command line as plugins are told it. See `cli::words`.
+    words: &'a [String],
+    /// Directories whose `pre` plugins have run, in that order, each with
+    /// the arguments its plugins are told.
+    visited: RefCell<Vec<(PathBuf, Vec<String>)>>,
     session: &'a Session,
     /// When this run started, which is the as-of time of what it records.
     started: u64,
@@ -164,13 +170,15 @@ pub struct Plugins<'a> {
 
 impl<'a> Plugins<'a> {
     /// `flags` are the built-in flags found on the command line by
-    /// `cli::scan`. Plugins do not run for `--version` or `--remove-cache`,
-    /// neither of which uses the `yio.md`.
-    pub fn new(flags: Builtins, session: &'a Session, started: u64) -> Self {
+    /// `cli::scan`, and `words` is the rest of it, from `cli::words`.
+    /// Plugins do not run for `--version` or `--remove-cache`, neither of
+    /// which uses the `yio.md`.
+    pub fn new(flags: Builtins, words: &'a [String], session: &'a Session, started: u64) -> Self {
         Plugins {
             enabled: !flags.version && !flags.remove_cache,
             verbose: flags.verbose,
-            vars: flags.env(),
+            env: flags.env(),
+            words,
             visited: RefCell::default(),
             session,
             started,
@@ -184,32 +192,37 @@ impl<'a> Plugins<'a> {
 
     /// Call before the `yio.md` in `dir` is read, or before a cached copy of
     /// it is trusted. Runs that directory's `pre` plugins the first time.
-    pub fn before(&self, dir: &Path) -> Result<(), String> {
-        if !self.enabled || self.visited.borrow().iter().any(|seen| seen == dir) {
+    ///
+    /// `mount` names the commands that `yio.md` is embedded under, which
+    /// decides how much of the command line its plugins are told. A file
+    /// embedded in several places is told by the first one reached.
+    pub fn before(&self, dir: &Path, mount: &[String]) -> Result<(), String> {
+        if !self.enabled || self.visited.borrow().iter().any(|(seen, _)| seen == dir) {
             return Ok(());
         }
-        self.visited.borrow_mut().push(dir.to_path_buf());
-        self.stage(dir, Stage::Pre)
+        let args = cli::below(self.words, mount);
+        self.visited.borrow_mut().push((dir.to_path_buf(), args.to_vec()));
+        self.stage(dir, args, Stage::Pre)
     }
 
     /// Call once the command tree is ready. Runs the `post` plugins of every
     /// directory whose `yio.md` went into it, in the order they were reached.
     pub fn after(&self) -> Result<(), String> {
         let visited = self.visited.borrow().clone();
-        visited.iter().try_for_each(|dir| self.stage(dir, Stage::Post))
+        visited.iter().try_for_each(|(dir, args)| self.stage(dir, args, Stage::Post))
     }
 
-    fn stage(&self, dir: &Path, stage: Stage) -> Result<(), String> {
+    fn stage(&self, dir: &Path, args: &[String], stage: Stage) -> Result<(), String> {
         for plugin in discover(dir, stage)? {
             let source = show(&dir.join(".yio").join(stage.name()).join(&plugin.file));
-            let replayed = self.replay(&source, &plugin);
+            let replayed = self.replay(&source, &plugin, args);
             if self.verbose {
                 let from = if replayed.is_some() { ", from the cache" } else { "" };
                 eprintln!("yio: {} plugin {} ({source}){from}", stage.name(), plugin.name);
             }
             let text = match replayed {
                 Some(text) => text,
-                None => self.execute(dir, stage, &plugin, source)?,
+                None => self.execute(dir, stage, &plugin, source, args)?,
             };
             print!("{text}");
         }
@@ -218,13 +231,14 @@ impl<'a> Plugins<'a> {
 
     /// The text of a `.yio` plugin's stored value, if there is one and
     /// nothing it depended on has changed. The plugin is then not run.
-    fn replay(&self, source: &str, plugin: &Plugin) -> Option<String> {
+    fn replay(&self, source: &str, plugin: &Plugin, args: &[String]) -> Option<String> {
         if plugin.kind != Kind::Yio {
             // A bash plugin can read anything, so it can never be replayed.
             return None;
         }
         let unit = self.session.find(UnitKind::Script, source)?;
-        let settled = match input::check(&unit.inputs, unit.as_of, self.started, &self.vars) {
+        let vars = Vars { env: &self.env, args };
+        let settled = match input::check(&unit.inputs, unit.as_of, self.started, vars) {
             Freshness::Dirty => return None,
             Freshness::Clean => None,
             Freshness::Settled(inputs) => Some(inputs),
@@ -246,8 +260,9 @@ impl<'a> Plugins<'a> {
         stage: Stage,
         plugin: &Plugin,
         source: String,
+        args: &[String],
     ) -> Result<String, String> {
-        let ran = run(dir, stage, plugin, &self.vars)?;
+        let ran = run(dir, stage, plugin, Vars { env: &self.env, args })?;
         if self.session.active()
             && let Some(body) = ran.value
         {
@@ -338,7 +353,7 @@ mod tests {
 (col (col-def "File" files) (col-def "Size" (map files file-size)))"#,
         );
         let plugins = discover(scratch.root(), Stage::Pre).unwrap();
-        let text = run(scratch.root(), Stage::Pre, &plugins[0], &[]).unwrap().text;
+        let text = run(scratch.root(), Stage::Pre, &plugins[0], Vars::NONE).unwrap().text;
         assert_eq!(text, "File       Size\n---------  ----\nlore/a.md  1\nlore/b.md  3\n");
     }
 
@@ -352,7 +367,7 @@ mod tests {
         let plugin = &discover(scratch.root(), Stage::Pre).unwrap()[0];
         let run = |cache: &str| {
             let vars = [("YIO_CACHE", cache.to_string())];
-            run(scratch.root(), Stage::Pre, plugin, &vars).unwrap().text
+            run(scratch.root(), Stage::Pre, plugin, Vars { env: &vars, args: &[] }).unwrap().text
         };
         assert_eq!(run("false"), "not caching\n");
         assert_eq!(run("true"), "");
@@ -365,9 +380,9 @@ mod tests {
         scratch.write(".yio/post/4_fn.yio", "(fn (x) x)");
         let plugins = discover(scratch.root(), Stage::Post).unwrap();
 
-        let error = run(scratch.root(), Stage::Post, &plugins[0], &[]).unwrap_err();
+        let error = run(scratch.root(), Stage::Post, &plugins[0], Vars::NONE).unwrap_err();
         assert!(error.ends_with("/.yio/post/3_bad.yio:2:4: `nope` is not defined"), "{error}");
-        let error = run(scratch.root(), Stage::Post, &plugins[1], &[]).unwrap_err();
+        let error = run(scratch.root(), Stage::Post, &plugins[1], Vars::NONE).unwrap_err();
         assert!(
             error.ends_with("/.yio/post/4_fn.yio: a script's result cannot contain a function"),
             "{error}"
@@ -378,9 +393,9 @@ mod tests {
     /// from the cache instead of from running it.
     fn shown(plugins: &Plugins, dir: &Path, plugin: &Plugin) -> (String, bool) {
         let source = show(&dir.join(".yio").join("pre").join(&plugin.file));
-        match plugins.replay(&source, plugin) {
+        match plugins.replay(&source, plugin, &[]) {
             Some(text) => (text, true),
-            None => (plugins.execute(dir, Stage::Pre, plugin, source).unwrap(), false),
+            None => (plugins.execute(dir, Stage::Pre, plugin, source, &[]).unwrap(), false),
         }
     }
 
@@ -402,7 +417,7 @@ mod tests {
         let plugin = &discover(scratch.root(), Stage::Pre).unwrap()[0];
         let started = input::now();
         let session = Session::from_file(None, true);
-        let plugins = Plugins::new(Builtins::default(), &session, started);
+        let plugins = Plugins::new(Builtins::default(), &[], &session, started);
         assert_eq!(shown(&plugins, scratch.root(), plugin), ran("lore/a.md 1\n"));
         (session.contents(), started)
     }
@@ -415,7 +430,7 @@ mod tests {
         let later = started + 10 * SECOND;
 
         let session = Session::from_file(Some(&file), false);
-        let plugins = Plugins::new(Builtins::default(), &session, later);
+        let plugins = Plugins::new(Builtins::default(), &[], &session, later);
         assert_eq!(shown(&plugins, scratch.root(), plugin), replayed("lore/a.md 1\n"));
 
         // Swapping the stored value shows the script really was not run.
@@ -423,7 +438,7 @@ mod tests {
         units[0].body = encode::encode(&Value::str("from the cache")).unwrap();
         let doctored = cache::serialize(&units);
         let session = Session::from_file(Some(&doctored), false);
-        let plugins = Plugins::new(Builtins::default(), &session, later);
+        let plugins = Plugins::new(Builtins::default(), &[], &session, later);
         assert_eq!(shown(&plugins, scratch.root(), plugin), replayed("from the cache\n"));
     }
 
@@ -435,7 +450,7 @@ mod tests {
         let later = started + 10 * SECOND;
         let show_now = || {
             let session = Session::from_file(Some(&file), false);
-            let plugins = Plugins::new(Builtins::default(), &session, later);
+            let plugins = Plugins::new(Builtins::default(), &[], &session, later);
             let result = shown(&plugins, scratch.root(), plugin);
             (result, session.refreshed().map(|contents| cache::parse(&contents).unwrap()))
         };
@@ -468,7 +483,7 @@ mod tests {
     fn next_run(scratch: &Scratch, file: &[u8], started: u64) -> ((String, bool), Vec<u8>) {
         let plugin = &discover(scratch.root(), Stage::Pre).unwrap()[0];
         let session = Session::from_file(Some(file), false);
-        let plugins = Plugins::new(Builtins::default(), &session, started + 10 * SECOND);
+        let plugins = Plugins::new(Builtins::default(), &[], &session, started + 10 * SECOND);
         let result = shown(&plugins, scratch.root(), plugin);
         (result, session.contents())
     }
@@ -552,7 +567,7 @@ mod tests {
         let caching = Builtins { cache: true, ..Builtins::default() };
 
         let session = Session::from_file(None, true);
-        let plugins = Plugins::new(caching, &session, started);
+        let plugins = Plugins::new(caching, &[], &session, started);
         assert_eq!(shown(&plugins, scratch.root(), plugin), ran("caching\n"));
         let file = session.contents();
 
@@ -560,13 +575,94 @@ mod tests {
         // cannot use it.
         let later = started + 10 * SECOND;
         let session = Session::from_file(Some(&file), false);
-        let plugins = Plugins::new(Builtins::default(), &session, later);
+        let plugins = Plugins::new(Builtins::default(), &[], &session, later);
         assert_eq!(shown(&plugins, scratch.root(), plugin), ran("not caching\n"));
         let file = session.refreshed().unwrap();
 
         let session = Session::from_file(Some(&file), false);
-        let plugins = Plugins::new(Builtins::default(), &session, later);
+        let plugins = Plugins::new(Builtins::default(), &[], &session, later);
         assert_eq!(shown(&plugins, scratch.root(), plugin), replayed("not caching\n"));
+    }
+
+    #[test]
+    fn a_yio_plugin_reads_the_arguments_it_is_told() {
+        let scratch = Scratch::new("plugin-args");
+        scratch.write(".yio/pre/1_args.yio", r#"(str (len (args)) ": " (join (args) ", "))"#);
+        let plugin = &discover(scratch.root(), Stage::Pre).unwrap()[0];
+        let run = |line: &[&str]| {
+            let args: Vec<String> = line.iter().map(|arg| arg.to_string()).collect();
+            run(scratch.root(), Stage::Pre, plugin, Vars { env: &[], args: &args }).unwrap()
+        };
+        assert_eq!(run(&[]).text, "0: \n");
+        assert_eq!(run(&["search", "two words", ""]).text, "3: search, two words, \n");
+        // The script and the arguments are what its value depends on.
+        let inputs = run(&["search"]).inputs;
+        assert!(matches!(inputs[..], [Input::File { .. }, Input::Args { .. }]), "{inputs:?}");
+    }
+
+    #[test]
+    fn a_stored_value_is_not_reused_under_different_arguments() {
+        let scratch = Scratch::new("plugin-replay-args");
+        scratch.write(".yio/pre/1_args.yio", r#"(join (args) " ")"#);
+        let plugin = &discover(scratch.root(), Stage::Pre).unwrap()[0];
+        let source = show(&scratch.root().join(".yio").join("pre").join(&plugin.file));
+        let started = input::now();
+        let words = |line: &str| line.split(' ').map(String::from).collect::<Vec<_>>();
+        // What one run shows when told `line`, and the cache file it leaves.
+        let next = |file: &[u8], line: &str| {
+            let args = words(line);
+            let session = Session::from_file(Some(file), false);
+            let plugins = Plugins::new(Builtins::default(), &[], &session, started + 10 * SECOND);
+            let result = match plugins.replay(&source, plugin, &args) {
+                Some(text) => (text, true),
+                None => {
+                    let text = plugins.execute(scratch.root(), Stage::Pre, plugin, source.clone(), &args);
+                    (text.unwrap(), false)
+                }
+            };
+            (result, session.contents())
+        };
+
+        let (result, file) = next(&cache::serialize(&[]), "search dir");
+        assert_eq!(result, ran("search dir\n"));
+        let (result, file) = next(&file, "search dir");
+        assert_eq!(result, replayed("search dir\n"));
+        // Other arguments, and the same words split differently, run it.
+        let (result, file) = next(&file, "search file");
+        assert_eq!(result, ran("search file\n"));
+        let (result, file) = next(&file, "search file");
+        assert_eq!(result, replayed("search file\n"));
+        assert_eq!(next(&file, "searchfile").0, ran("searchfile\n"));
+    }
+
+    #[test]
+    fn a_plugin_that_ignores_the_arguments_is_replayed_whatever_they_are() {
+        let scratch = Scratch::new("plugin-replay-no-args");
+        let (file, started) = first_run(&scratch);
+        let plugin = &discover(scratch.root(), Stage::Pre).unwrap()[0];
+        let source = show(&scratch.root().join(".yio").join("pre").join(&plugin.file));
+        let session = Session::from_file(Some(&file), false);
+        let plugins = Plugins::new(Builtins::default(), &[], &session, started + 10 * SECOND);
+        let args = ["build".to_string(), "web".to_string()];
+        assert_eq!(plugins.replay(&source, plugin, &args), Some("lore/a.md 1\n".to_string()));
+    }
+
+    #[test]
+    fn each_directory_is_told_the_words_after_where_it_is_embedded() {
+        let scratch = Scratch::new("plugin-mount");
+        let session = Session::from_file(None, false);
+        let words: Vec<String> = ["docs", "search", "dir"].map(String::from).to_vec();
+        let plugins = Plugins::new(Builtins::default(), &words, &session, 0);
+        let mount = |path: &[&str]| path.iter().map(|name| name.to_string()).collect::<Vec<_>>();
+
+        plugins.before(scratch.root(), &[]).unwrap();
+        plugins.before(&scratch.path("docs"), &mount(&["docs"])).unwrap();
+        plugins.before(&scratch.path("tools"), &mount(&["tools"])).unwrap();
+        // A second place the same directory is embedded changes nothing.
+        plugins.before(&scratch.path("docs"), &mount(&["docs", "search"])).unwrap();
+
+        let told: Vec<String> = plugins.visited.borrow().iter().map(|(_, args)| args.join(" ")).collect();
+        assert_eq!(told, ["docs search dir", "search dir", ""]);
     }
 
     #[test]
@@ -584,11 +680,11 @@ mod tests {
         };
         let file = cache::serialize(&[unit]);
         let session = Session::from_file(Some(&file), false);
-        let plugins = Plugins::new(Builtins::default(), &session, 0);
-        assert_eq!(plugins.replay(&source, &plugin), None);
+        let plugins = Plugins::new(Builtins::default(), &[], &session, 0);
+        assert_eq!(plugins.replay(&source, &plugin, &[]), None);
 
         let twin = Plugin { kind: Kind::Yio, ..plugin };
-        assert_eq!(plugins.replay(&source, &twin), Some("stored\n".to_string()));
+        assert_eq!(plugins.replay(&source, &twin, &[]), Some("stored\n".to_string()));
     }
 
     #[test]
@@ -597,7 +693,7 @@ mod tests {
         scratch.write(".yio/pre/1_hello.yio", r#""hello""#);
         let plugin = &discover(scratch.root(), Stage::Pre).unwrap()[0];
         let session = Session::from_file(None, false);
-        let plugins = Plugins::new(Builtins::default(), &session, input::now());
+        let plugins = Plugins::new(Builtins::default(), &[], &session, input::now());
         assert_eq!(shown(&plugins, scratch.root(), plugin), ran("hello\n"));
         assert_eq!(cache::parse(&session.contents()).unwrap(), []);
     }
@@ -609,17 +705,17 @@ mod tests {
         scratch.write(".yio/pre/1_boom.yio", "(nope)");
         let session = Session::from_file(None, false);
 
-        let plugins = Plugins::new(Builtins::default(), &session, 0);
-        assert!(plugins.before(scratch.root()).is_err());
-        assert!(plugins.before(scratch.root()).is_ok());
+        let plugins = Plugins::new(Builtins::default(), &[], &session, 0);
+        assert!(plugins.before(scratch.root(), &[]).is_err());
+        assert!(plugins.before(scratch.root(), &[]).is_ok());
 
         for flags in [
             Builtins { version: true, ..Builtins::default() },
             Builtins { remove_cache: true, ..Builtins::default() },
         ] {
-            let plugins = Plugins::new(flags, &session, 0);
+            let plugins = Plugins::new(flags, &[], &session, 0);
             assert!(!plugins.enabled());
-            assert!(plugins.before(scratch.root()).is_ok());
+            assert!(plugins.before(scratch.root(), &[]).is_ok());
             assert!(plugins.after().is_ok());
         }
     }

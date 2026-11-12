@@ -80,19 +80,51 @@ impl Builtins {
 pub fn scan(args: &[String]) -> Builtins {
     let mut found = Builtins::default();
     for arg in args.iter().take_while(|arg| *arg != "--") {
-        if let Some(body) = arg.strip_prefix("--") {
-            let (name, value) = body.split_once('=').unwrap_or((body, "true"));
-            if let Some(builtin) = Builtin::ALL.into_iter().find(|b| b.long() == name) {
-                found.set(builtin, value != "false");
-            }
-        } else if let Some(cluster) = arg.strip_prefix('-') {
-            let builtin = |c| Builtin::ALL.into_iter().find(|b| b.short() == Some(c));
-            if !cluster.is_empty() && cluster.chars().all(|c| builtin(c).is_some()) {
-                cluster.chars().filter_map(builtin).for_each(|b| found.set(b, true));
-            }
+        for (builtin, value) in spelled(arg) {
+            found.set(builtin, value);
         }
     }
     found
+}
+
+/// The built-in flags that `arg` sets, going by its spelling alone. Empty
+/// when it is anything else.
+fn spelled(arg: &str) -> Vec<(Builtin, bool)> {
+    if let Some(body) = arg.strip_prefix("--") {
+        let (name, value) = body.split_once('=').unwrap_or((body, "true"));
+        let builtin = Builtin::ALL.into_iter().find(|b| b.long() == name);
+        return builtin.map(|builtin| (builtin, value != "false")).into_iter().collect();
+    }
+    let Some(cluster) = arg.strip_prefix('-') else {
+        return Vec::new();
+    };
+    let builtin = |c| Builtin::ALL.into_iter().find(|b| b.short() == Some(c));
+    if cluster.chars().all(|c| builtin(c).is_some()) {
+        cluster.chars().filter_map(builtin).map(|builtin| (builtin, true)).collect()
+    } else {
+        Vec::new()
+    }
+}
+
+/// The command line as plugins are told it: every argument except the
+/// built-in flags, which they are told as `YIO_*` variables instead.
+///
+/// Like `scan`, this goes by spelling, and nothing after `--` is a flag.
+pub fn words(args: &[String]) -> Vec<String> {
+    let mut literal = false;
+    let keep = |arg: &&String| {
+        literal |= *arg == "--";
+        literal || spelled(arg).is_empty()
+    };
+    args.iter().filter(keep).cloned().collect()
+}
+
+/// The part of `words` that is for a `yio.md` embedded under the commands
+/// in `mount`: what follows those command names. Empty when the command
+/// line leads somewhere else. For the `yio.md` that `yio` was started on,
+/// `mount` is empty and this is every word.
+pub fn below<'a>(words: &'a [String], mount: &[String]) -> &'a [String] {
+    words.strip_prefix(mount).unwrap_or(&[])
 }
 
 /// Parses `args` (without the program name) against the tree under `root`.
@@ -561,6 +593,34 @@ echo
         assert_eq!(found("-jV -x"), Builtins::default());
         // Nothing after `--` is a flag.
         assert_eq!(found("build -- --cache -V"), Builtins::default());
+    }
+
+    #[test]
+    fn plugins_are_told_the_words_but_not_the_builtin_flags() {
+        let told = |line: &str| words(&args(line)).join(" ");
+        assert_eq!(told(""), "");
+        assert_eq!(told("search built-in functions"), "search built-in functions");
+        assert_eq!(told("-V search --help dir --cache=false"), "search dir");
+        assert_eq!(told("-hV build web -j 8 --release"), "build web -j 8 --release");
+        // A cluster with anything else in it is some command's own flags.
+        assert_eq!(told("build -jV 8"), "build -jV 8");
+        // Nothing after `--` is a flag, and the `--` is kept.
+        assert_eq!(told("search -V -- --help -v"), "search -- --help -v");
+        assert_eq!(told("search -"), "search -");
+    }
+
+    #[test]
+    fn an_embedded_file_gets_the_words_after_where_it_sits() {
+        let words = args("docs search built-in functions");
+        let mount = |path: &str| args(path);
+        assert_eq!(below(&words, &mount("")), words);
+        assert_eq!(below(&words, &mount("docs")), &words[1..]);
+        assert_eq!(below(&words, &mount("docs search")), &words[2..]);
+        // The command line leads somewhere else.
+        assert_eq!(below(&words, &mount("tools")), [""; 0]);
+        assert_eq!(below(&words, &mount("docs api")), [""; 0]);
+        assert_eq!(below(&args("docs"), &mount("docs")), [""; 0]);
+        assert_eq!(below(&args("-- docs search"), &mount("docs")), [""; 0]);
     }
 
     #[test]

@@ -31,28 +31,41 @@ impl From<io::Error> for ReadError {
 }
 
 /// Provides the text of a `yio.md`. Paths are relative to the current
-/// directory. This is called exactly once for each file that is loaded,
-/// just before it is needed.
-pub type Read<'r> = &'r dyn Fn(&Path) -> Result<String, ReadError>;
+/// directory. This is called each time a file is loaded, just before it is
+/// needed. The second argument names the commands the file is being
+/// embedded under, outermost first; it is empty for the file `yio` was
+/// started on.
+pub type Read<'r> = &'r dyn Fn(&Path, &[String]) -> Result<String, ReadError>;
 
 /// Loads the `yio.md` at `file`, whose contents are `source`, along with
 /// every file it embeds. Error messages name the file and 1-based line.
 pub fn load(file: &Path, source: &str, read: Read) -> Result<Command, String> {
     let mut open = vec![normalize(file)];
-    load_source(source, &mut open, read)
+    load_source(source, &mut open, read, &[], None)
 }
 
 /// Loads a single file with nothing available to embed.
 #[cfg(test)]
 pub fn parse(source: &str) -> Result<Command, String> {
-    let read = |_: &Path| Err(ReadError::Io(io::Error::from(io::ErrorKind::NotFound)));
+    let read = |_: &Path, _: &[String]| Err(ReadError::Io(io::Error::from(io::ErrorKind::NotFound)));
     load(Path::new(FILE_NAME), source, &read)
 }
 
 /// Loads the file at the top of `open`, the chain of files being loaded.
-fn load_source(source: &str, open: &mut Vec<PathBuf>, read: Read) -> Result<Command, String> {
+/// `mount` names the commands it is being embedded under.
+///
+/// With a `section`, only the command whose heading has that anchor is
+/// kept, as the one subcommand of the result. There is none if no heading
+/// has it.
+fn load_source(
+    source: &str,
+    open: &mut Vec<PathBuf>,
+    read: Read,
+    mount: &[String],
+    section: Option<&str>,
+) -> Result<Command, String> {
     let file = open.last().expect("the file being loaded is open").clone();
-    read_lines(source, &file, open, read).map_err(|error| match error {
+    read_lines(source, &file, open, read, mount, section).map_err(|error| match error {
         Error::Line(line_no, message) => format!("{}: line {line_no}: {message}", show(&file)),
         Error::Embedded(message) => message,
     })
@@ -74,10 +87,12 @@ fn read_lines(
     file: &Path,
     open: &mut Vec<PathBuf>,
     read: Read,
+    mount: &[String],
+    section: Option<&str>,
 ) -> Result<Command, Error> {
     let lines: Vec<&str> = source.lines().collect();
     let dir = file.parent().map(Path::to_path_buf).unwrap_or_default();
-    let mut loader = Loader::new(dir, open, read);
+    let mut loader = Loader::new(dir, open, read, mount, section);
     let mut i = 0;
     while i < lines.len() {
         let line_no = i + 1;
@@ -146,11 +161,13 @@ struct Open {
     /// Short and long help of an embedded file, used if the heading turns
     /// out to have none of its own.
     embedded_help: (Option<String>, Option<String>),
+    /// Whether this is the one command the file is being loaded for.
+    wanted: bool,
 }
 
 impl Open {
     fn new(level: usize, command: Command) -> Self {
-        Open { level, command, embedded_help: (None, None) }
+        Open { level, command, embedded_help: (None, None), wanted: false }
     }
 
     fn close(self) -> Command {
@@ -174,10 +191,24 @@ struct Loader<'a, 'c> {
     /// The chain of files being loaded, ending with the one being read.
     open: &'c mut Vec<PathBuf>,
     read: Read<'c>,
+    /// The commands this file is embedded under, outermost first.
+    mount: Vec<String>,
+    /// When only one command of the file is wanted, its heading's anchor.
+    section: Option<String>,
+    /// The anchors of the headings read so far, when a section is wanted.
+    anchors: Vec<String>,
+    /// The wanted command, once its heading and everything under it is read.
+    found: Option<Command>,
 }
 
 impl<'a, 'c> Loader<'a, 'c> {
-    fn new(dir: PathBuf, open: &'c mut Vec<PathBuf>, read: Read<'c>) -> Self {
+    fn new(
+        dir: PathBuf,
+        open: &'c mut Vec<PathBuf>,
+        read: Read<'c>,
+        mount: &[String],
+        section: Option<&str>,
+    ) -> Self {
         let mut loader = Loader {
             stack: Vec::new(),
             paragraph: Vec::new(),
@@ -186,6 +217,10 @@ impl<'a, 'c> Loader<'a, 'c> {
             dir,
             open,
             read,
+            mount: mount.to_vec(),
+            section: section.map(str::to_string),
+            anchors: Vec::new(),
+            found: None,
         };
         let root = loader.located(Command::root());
         loader.stack.push(Open::new(1, root));
@@ -214,21 +249,84 @@ impl<'a, 'c> Loader<'a, 'c> {
     /// nearest shallower heading.
     fn close_to(&mut self, level: usize) {
         while self.stack.len() > 1 && self.stack[self.stack.len() - 1].level >= level {
-            let done = self.stack.pop().expect("checked above").close();
+            let open = self.stack.pop().expect("checked above");
+            let wanted = open.wanted;
+            let done = open.close();
+            if wanted {
+                self.found = Some(done.clone());
+            }
             self.current().subcommands.push(done);
         }
     }
 
     fn finish(mut self) -> Command {
         self.close_to(0);
-        self.stack.pop().expect("root is always present").close()
+        let root = self.stack.pop().expect("root is always present").close();
+        match self.section {
+            // Only the wanted command leaves the file. Its help is its own,
+            // so the file's is not passed on.
+            Some(_) => Command { subcommands: self.found.into_iter().collect(), ..Command::root() },
+            None => root,
+        }
+    }
+
+    /// Whether what is being read now will be kept: always, unless only one
+    /// section of the file is wanted and this is outside it.
+    fn kept(&self) -> bool {
+        self.section.is_none() || self.stack.iter().any(|open| open.wanted)
+    }
+
+    /// The anchor of a heading, as GitHub and most Markdown renderers make
+    /// it: lower case, spaces as hyphens, punctuation dropped, and a number
+    /// added when an earlier heading already has it.
+    fn anchor(&mut self, title: &str) -> String {
+        let base: String = title
+            .to_lowercase()
+            .chars()
+            .filter_map(|c| match c {
+                ' ' => Some('-'),
+                c if c.is_alphanumeric() || c == '-' || c == '_' => Some(c),
+                _ => None,
+            })
+            .collect();
+        let mut anchor = base.clone();
+        let mut count = 0;
+        while self.anchors.contains(&anchor) {
+            count += 1;
+            anchor = format!("{base}-{count}");
+        }
+        self.anchors.push(anchor.clone());
+        anchor
+    }
+
+    /// The commands a file embedded here sits under, outermost first.
+    fn mount_here(&self) -> Vec<String> {
+        let here = self.stack.iter().skip(1).map(|open| open.command.name.clone());
+        self.mount.iter().cloned().chain(here).collect()
     }
 
     /// Loads the `yio.md` that `target` links to and places its commands
     /// under the current one, as if they had been written here.
-    fn embed(&mut self, line_no: usize, target: &str) -> Result<(), Error> {
-        let file = normalize(&self.dir.join(target));
+    fn embed(&mut self, line_no: usize, link: Link) -> Result<(), Error> {
+        let own = self.open.last().expect("the file being read is open");
+        let file = match link.file {
+            "" => own.clone(),
+            file => normalize(&self.dir.join(file)),
+        };
         let shown = show(&file);
+        if let Some(section) = link.section
+            && file == *own
+        {
+            return Err(err(
+                line_no,
+                &format!("`#{section}` is in this file; a file cannot embed part of itself"),
+            ));
+        }
+        // Only one section of this file is wanted, and the link is outside
+        // it, so what it embeds would be thrown away.
+        if !self.kept() {
+            return Ok(());
+        }
         if self.open.contains(&file) {
             return Err(err(
                 line_no,
@@ -241,15 +339,24 @@ impl<'a, 'c> Loader<'a, 'c> {
                 &format!("embeds are nested more than {MAX_DEPTH} files deep"),
             ));
         }
-        let source = (self.read)(&file).map_err(|error| match error {
+        let mount = self.mount_here();
+        let source = (self.read)(&file, &mount).map_err(|error| match error {
             ReadError::Io(cause) => err(line_no, &format!("could not read `{shown}`: {cause}")),
             ReadError::Failed(message) => Error::Embedded(message),
         })?;
 
         self.open.push(file);
-        let embedded = load_source(&source, self.open, self.read);
+        let embedded = load_source(&source, self.open, self.read, &mount, link.section);
         self.open.pop();
         let embedded = embedded.map_err(Error::Embedded)?;
+        if let Some(section) = link.section
+            && embedded.subcommands.is_empty()
+        {
+            return Err(err(
+                line_no,
+                &format!("`{shown}` has no command whose heading has the anchor `#{section}`"),
+            ));
+        }
 
         let top = self.top();
         for command in embedded.subcommands {
@@ -271,6 +378,9 @@ impl<'a, 'c> Loader<'a, 'c> {
     }
 
     fn heading(&mut self, line_no: usize, level: usize, title: &str) -> Result<(), Error> {
+        // Every heading takes an anchor, the H1 included, so that later
+        // headings with the same text are numbered as a renderer would.
+        let wanted = self.section.is_some() && Some(self.anchor(title)) == self.section;
         if level == 1 {
             if self.seen_h1 || self.in_command() {
                 return Err(err(
@@ -294,7 +404,7 @@ impl<'a, 'c> Loader<'a, 'c> {
             ));
         }
         let command = self.located(command);
-        self.stack.push(Open::new(level, command));
+        self.stack.push(Open { wanted, ..Open::new(level, command) });
         Ok(())
     }
 
@@ -321,8 +431,8 @@ impl<'a, 'c> Loader<'a, 'c> {
         }
         let text = self.paragraph.join("\n");
         self.paragraph.clear();
-        if let Some(target) = embed_target(&text) {
-            return self.embed(self.paragraph_line, target);
+        if let Some(link) = embed_link(&text) {
+            return self.embed(self.paragraph_line, link);
         }
         match &mut self.current().long_help {
             Some(help) => {
@@ -712,16 +822,32 @@ fn is_thematic_break(text: &str) -> bool {
     }
 }
 
+/// What an embedding link points at.
+struct Link<'a> {
+    /// The path as written, relative to the file the link is in. Empty for
+    /// a link that is only a `#section`, which points into that same file.
+    file: &'a str,
+    /// The anchor after `#`, when the link names one.
+    section: Option<&'a str>,
+}
+
 /// If a paragraph is nothing but a relative link to a file named `yio.md`,
-/// returns the link target. A lone link to anything else, such as a README,
-/// is ordinary help text.
-fn embed_target(paragraph: &str) -> Option<&str> {
+/// or to a section of one, returns what it points at. A lone link to
+/// anything else, such as a README, is ordinary help text.
+fn embed_link(paragraph: &str) -> Option<Link<'_>> {
     let inner = paragraph.strip_prefix('[')?.strip_suffix(')')?;
     let (label, target) = inner.split_once("](")?;
     let lone = !label.contains(']') && !target.contains(['(', ')', ' ', '\n']);
-    let relative = !target.contains("://") && !target.starts_with('/');
-    let named = target.rsplit('/').next() == Some(FILE_NAME);
-    (lone && relative && named).then_some(target)
+    let (file, section) = match target.split_once('#') {
+        Some((file, section)) => (file, Some(section).filter(|section| !section.is_empty())),
+        None => (target, None),
+    };
+    let relative = !target.contains("://") && !file.starts_with('/');
+    let named = match file {
+        "" => section.is_some(),
+        file => file.rsplit('/').next() == Some(FILE_NAME),
+    };
+    (lone && relative && named).then_some(Link { file, section })
 }
 
 /// Resolves `.` and `..` in a relative path without touching the file
@@ -1010,7 +1136,7 @@ See [docs](docs/yio.md) for more.
 
     /// Loads the first of `files`, serving the rest by path for embedding.
     fn load_files(files: &[(&str, &str)]) -> Result<Command, String> {
-        let read = |path: &Path| {
+        let read = |path: &Path, _: &[String]| {
             let wanted = show(path);
             let found = files.iter().find(|(name, _)| *name == wanted);
             found
@@ -1146,6 +1272,223 @@ See [docs](docs/yio.md) for more.
         ])
         .unwrap_err();
         assert_eq!(error, "yio.md: line 5: command `build` is defined twice");
+    }
+
+    const SECTIONS: &str = "\
+# Docs
+
+> Documentation tasks
+
+## build (OUT)
+
+> Build the docs
+
+```
+echo build
+```
+
+### clean
+
+```
+echo clean
+```
+
+## search [...TERMS]
+
+> Search the docs
+
+```
+echo search
+```
+
+## clean
+";
+
+    #[test]
+    fn a_link_to_a_section_embeds_that_one_command() {
+        let root = load_files(&[
+            ("yio.md", "## docs\n\n> Mine\n\n[search](docs/yio.md#search-terms)\n\n## other\n"),
+            ("docs/yio.md", SECTIONS),
+        ])
+        .unwrap();
+        let docs = &root.subcommands[0];
+        // Only that command, under its own name, with its own help.
+        assert_eq!(names(docs), ["search"]);
+        let search = &docs.subcommands[0];
+        assert_eq!(search.rest.as_deref(), Some("TERMS"));
+        assert_eq!(search.short_help.as_deref(), Some("Search the docs"));
+        assert_eq!(search.scripts, ["echo search\n"]);
+        assert_eq!(search.dir.as_deref(), Some(Path::new("docs")));
+        // The file's own help describes the file, not one of its sections.
+        assert_eq!(docs.short_help.as_deref(), Some("Mine"));
+        assert_eq!(docs.long_help, None);
+    }
+
+    #[test]
+    fn a_section_brings_its_subcommands_and_can_be_at_any_depth() {
+        let root = load_files(&[
+            (
+                "yio.md",
+                "[build](docs/yio.md#build-out)\n\n## deep\n\n[one](docs/yio.md#clean)\n\n## top\n\n[two](docs/yio.md#clean-1)\n",
+            ),
+            ("docs/yio.md", SECTIONS),
+        ])
+        .unwrap();
+        // Before any heading, the command becomes a top-level one.
+        assert_eq!(names(&root), ["build", "deep", "top"]);
+        assert_eq!(names(&root.subcommands[0]), ["clean"]);
+        // Two headings with the same text are told apart as a renderer
+        // does: the second one's anchor ends in `-1`.
+        assert_eq!(root.subcommands[1].subcommands[0].scripts, ["echo clean\n"]);
+        assert_eq!(root.subcommands[2].subcommands[0].scripts, [""; 0]);
+    }
+
+    #[test]
+    fn sections_of_one_file_can_be_embedded_side_by_side() {
+        let root = load_files(&[
+            ("yio.md", "## docs\n\n[a](docs/yio.md#search-terms)\n\n[b](docs/yio.md#build-out)\n"),
+            ("docs/yio.md", SECTIONS),
+        ])
+        .unwrap();
+        assert_eq!(names(&root.subcommands[0]), ["search", "build"]);
+
+        let error = load_files(&[
+            ("yio.md", "## docs\n\n[a](docs/yio.md#clean)\n\n[b](docs/yio.md#clean-1)\n"),
+            ("docs/yio.md", SECTIONS),
+        ])
+        .unwrap_err();
+        assert_eq!(error, "yio.md: line 5: command `clean` from `docs/yio.md` is already defined here");
+    }
+
+    #[test]
+    fn rejects_bad_section_links() {
+        let cases: [(&[(&str, &str)], &str); 8] = [
+            (
+                &[("yio.md", "## a\n\n[x](docs/yio.md#nope)\n"), ("docs/yio.md", SECTIONS)],
+                "yio.md: line 3: `docs/yio.md` has no command whose heading has the anchor `#nope`",
+            ),
+            // The H1 has an anchor, but it is not a command.
+            (
+                &[("yio.md", "## a\n\n[x](docs/yio.md#docs)\n"), ("docs/yio.md", SECTIONS)],
+                "yio.md: line 3: `docs/yio.md` has no command whose heading has the anchor `#docs`",
+            ),
+            // Anchors are lower case, and the arguments are part of them.
+            (
+                &[("yio.md", "## a\n\n[x](docs/yio.md#build)\n"), ("docs/yio.md", SECTIONS)],
+                "yio.md: line 3: `docs/yio.md` has no command whose heading has the anchor `#build`",
+            ),
+            // A file cannot embed part of itself, however the link is spelled.
+            (
+                &[("yio.md", "## a\n\n## b\n\n[a](#a)\n")],
+                "yio.md: line 5: `#a` is in this file; a file cannot embed part of itself",
+            ),
+            (
+                &[("yio.md", "## a\n\n## b\n\n[a](yio.md#a)\n")],
+                "yio.md: line 5: `#a` is in this file; a file cannot embed part of itself",
+            ),
+            (
+                &[("yio.md", "## a\n\n[docs](docs/yio.md)\n"), ("docs/yio.md", "## b\n\n## c\n\n[b](../docs/yio.md#b)\n")],
+                "docs/yio.md: line 5: `#b` is in this file; a file cannot embed part of itself",
+            ),
+            // Even in a part of the file that is not the section wanted.
+            (
+                &[("yio.md", "## a\n\n[b](docs/yio.md#b)\n"), ("docs/yio.md", "## b\n\n## c\n\n[b](#b)\n")],
+                "docs/yio.md: line 5: `#b` is in this file; a file cannot embed part of itself",
+            ),
+            // A section still has to be in a file that loads.
+            (
+                &[("yio.md", "## a\n\n[b](docs/yio.md#b)\n"), ("docs/yio.md", "## b\n\n## c\n```json\n{}\n```\n")],
+                "docs/yio.md: line 4: code block language `json`",
+            ),
+        ];
+        for (files, expected) in cases {
+            let error = load_files(files).unwrap_err();
+            assert!(error.starts_with(expected), "expected {expected:?}, got {error:?}");
+        }
+        // A lone `#` names no section, so the whole file is embedded.
+        let root = load_files(&[("yio.md", "## a\n\n[x](docs/yio.md#)\n"), ("docs/yio.md", SECTIONS)]);
+        assert_eq!(names(&root.unwrap().subcommands[0]), ["build", "search", "clean"]);
+    }
+
+    #[test]
+    fn cycles_through_sections_are_rejected() {
+        // The section that is wanted leads back to a file being loaded.
+        let error = load_files(&[
+            ("yio.md", "## a\n\n[b](docs/yio.md#b)\n"),
+            ("docs/yio.md", "## b\n\n[back](../yio.md)\n"),
+        ])
+        .unwrap_err();
+        assert_eq!(
+            error,
+            "docs/yio.md: line 3: `yio.md` is already being loaded; embeds cannot form a cycle"
+        );
+        // So does asking for only a section of it.
+        let error = load_files(&[
+            ("yio.md", "## a\n\n[b](docs/yio.md#b)\n\n## other\n"),
+            ("docs/yio.md", "## b\n\n[back](../yio.md#other)\n"),
+        ])
+        .unwrap_err();
+        assert_eq!(
+            error,
+            "docs/yio.md: line 3: `yio.md` is already being loaded; embeds cannot form a cycle"
+        );
+        // Through a third file.
+        let error = load_files(&[
+            ("yio.md", "## a\n\n[b](b/yio.md#b)\n"),
+            ("b/yio.md", "## b\n\n[c](../c/yio.md#c)\n"),
+            ("c/yio.md", "## c\n\n[b](../b/yio.md#b)\n"),
+        ])
+        .unwrap_err();
+        assert_eq!(
+            error,
+            "c/yio.md: line 3: `b/yio.md` is already being loaded; embeds cannot form a cycle"
+        );
+    }
+
+    #[test]
+    fn links_outside_the_wanted_section_are_not_followed() {
+        // `tools` links back to the root, but only `build` is wanted, so
+        // nothing is loaded twice and there is no cycle.
+        let files: &[(&str, &str)] = &[
+            ("yio.md", "## a\n\n[build](docs/yio.md#build)\n"),
+            ("docs/yio.md", "## tools\n\n[root](../yio.md)\n\n## build\n\n[more](more/yio.md)\n\n## gone\n\n[x](missing/yio.md)\n"),
+            ("docs/more/yio.md", "## extra\n"),
+        ];
+        let root = load_files(files).unwrap();
+        let build = &root.subcommands[0].subcommands[0];
+        assert_eq!(build.name, "build");
+        // Links inside the wanted section are.
+        assert_eq!(names(build), ["extra"]);
+    }
+
+    #[test]
+    fn each_file_is_read_with_the_commands_it_is_embedded_under() {
+        let files: &[(&str, &str)] = &[
+            ("yio.md", "[top](top/yio.md)\n\n## docs\n\n[docs](docs/yio.md)\n\n### part\n\n[one](one/yio.md#only)\n"),
+            ("top/yio.md", "## t\n"),
+            ("docs/yio.md", "## api\n\n[api](api/yio.md)\n"),
+            ("docs/api/yio.md", "## gen\n"),
+            ("one/yio.md", "## only\n"),
+        ];
+        let seen = std::cell::RefCell::new(Vec::new());
+        let read = |path: &Path, mount: &[String]| {
+            let wanted = show(path);
+            seen.borrow_mut().push(format!("{wanted} under [{}]", mount.join(" ")));
+            let found = files.iter().find(|(name, _)| *name == wanted);
+            found
+                .map(|(_, source)| source.to_string())
+                .ok_or_else(|| ReadError::Io(io::Error::from(io::ErrorKind::NotFound)))
+        };
+        load(Path::new("yio.md"), files[0].1, &read).unwrap();
+        assert_eq!(
+            seen.into_inner(),
+            [
+                "top/yio.md under []",
+                "docs/yio.md under [docs]",
+                "docs/api/yio.md under [docs api]",
+                "one/yio.md under [docs part]",
+            ]
+        );
     }
 
     #[test]

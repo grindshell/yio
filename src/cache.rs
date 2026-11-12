@@ -36,7 +36,7 @@ use crate::input::{Input, PathKind};
 pub const FILE: &str = ".yio/cache.yio";
 
 /// Bumped whenever the payload layout changes.
-const FORMAT: u8 = 3;
+const FORMAT: u8 = 4;
 const PREFIX: &[u8] = b"(cache #";
 
 /// How deeply commands may nest in a cache file. Real trees stay far below
@@ -247,6 +247,7 @@ const DIR_INPUT: u8 = 2;
 const KIND_INPUT: u8 = 3;
 const SIZE_INPUT: u8 = 4;
 const ENV_INPUT: u8 = 5;
+const ARGS_INPUT: u8 = 6;
 
 fn put_input(out: &mut Vec<u8>, input: &Input) {
     match input {
@@ -284,6 +285,12 @@ fn put_input(out: &mut Vec<u8>, input: &Input) {
             put_u8(out, u8::from(hash.is_some()));
             put_u64(out, hash.unwrap_or(0));
         }
+        Input::Args { hash } => {
+            put_u8(out, ARGS_INPUT);
+            // Every input starts with a string. This kind has no use for it.
+            put_str(out, "");
+            put_u64(out, *hash);
+        }
     }
 }
 
@@ -311,6 +318,7 @@ fn take_input(reader: &mut Reader) -> Result<Input, String> {
             let hash = reader.u64()?;
             Input::Env { name: path, hash: set.then_some(hash) }
         }
+        ARGS_INPUT => Input::Args { hash: reader.u64()? },
         _ => return Err("cache has an unknown kind of input".to_string()),
     })
 }
@@ -506,6 +514,7 @@ echo \"two\"
             Input::Size { path: "lore/a.md".to_string(), size: 12 },
             Input::Env { name: "HOME".to_string(), hash: Some(0) },
             Input::Env { name: "UNSET".to_string(), hash: None },
+            Input::Args { hash: 9 },
         ];
         let unit = Unit { inputs, ..script_unit("x") };
         assert_eq!(parse(&serialize(std::slice::from_ref(&unit))).unwrap(), [unit]);

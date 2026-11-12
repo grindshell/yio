@@ -10,8 +10,9 @@ use std::process::{Command as Process, ExitCode};
 pub enum Script<'a> {
     /// The text of a script.
     Text(&'a str),
-    /// A script file, relative to the directory it runs in.
-    File(&'a str),
+    /// A script file, relative to the directory it runs in, and the
+    /// arguments it is given as `$1`, `$2`, and so on.
+    File(&'a str, &'a [String]),
 }
 
 /// Runs each script in its own bash process, in order, adding `env` to the
@@ -106,9 +107,20 @@ fn pass_script(process: &mut Process, bash: &Path, script: Script) {
     }
     let _ = bash;
     match script {
-        Script::Text(text) => process.arg("-c").arg(text),
-        Script::File(file) => process.arg(file),
-    };
+        Script::Text(text) => {
+            process.arg("-c").arg(text);
+        }
+        Script::File(file, args) => {
+            process.arg(file);
+            #[cfg(not(windows))]
+            process.args(args);
+            #[cfg(windows)]
+            for arg in args {
+                use std::os::windows::process::CommandExt;
+                process.raw_arg(wsl::always_quoted(arg));
+            }
+        }
+    }
 }
 
 /// The bash to run: the first one on `PATH`.
@@ -160,7 +172,10 @@ mod wsl {
     pub fn pass_script(process: &mut Process, script: Script) {
         match script {
             Script::Text(text) => process.arg("-c").raw_arg(quote(text)),
-            Script::File(file) => process.raw_arg(quote(file)),
+            Script::File(file, args) => {
+                process.raw_arg(quote(file));
+                args.iter().fold(process, |process, arg| process.raw_arg(quote(arg)))
+            }
         };
     }
 
@@ -177,6 +192,53 @@ mod wsl {
         process.env("WSLENV", names);
     }
 
+    /// `arg` in double quotes, as it goes onto a Windows command line.
+    ///
+    /// This is for every other bash on Windows, such as Git Bash. Those are
+    /// built on MSYS or Cygwin, which read the command line again when the
+    /// program that started them is a Windows one: an argument that is not
+    /// quoted has `*` expanded against the files in the directory, `'`
+    /// taken as the start of a quotation, and `@name` replaced with the
+    /// contents of a file. The standard library quotes an argument only
+    /// when it has a space in it, so the arguments a plugin is told, which
+    /// can be anything, are always quoted here.
+    pub fn always_quoted(arg: &str) -> String {
+        let mut quoted = String::from('"');
+        let mut backslashes = 0;
+        for c in arg.chars() {
+            match c {
+                '\\' => backslashes += 1,
+                // A quote needs a backslash, and each backslash before it
+                // one more, or they would be read as escaping the quote.
+                '"' => {
+                    quoted.extend(std::iter::repeat_n('\\', backslashes + 1));
+                    backslashes = 0;
+                }
+                _ => backslashes = 0,
+            }
+            quoted.push(c);
+        }
+        // The same goes for backslashes before the closing quote.
+        quoted.extend(std::iter::repeat_n('\\', backslashes));
+        quoted.push('"');
+        quoted
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::always_quoted;
+
+        #[test]
+        fn quotes_an_argument_for_a_windows_command_line() {
+            assert_eq!(always_quoted("plain"), r#""plain""#);
+            assert_eq!(always_quoted(""), r#""""#);
+            assert_eq!(always_quoted("it's *"), r#""it's *""#);
+            assert_eq!(always_quoted(r#"a"b"#), r#""a\"b""#);
+            assert_eq!(always_quoted(r"dir\file"), r#""dir\file""#);
+            assert_eq!(always_quoted(r#"a\"b"#), r#""a\\\"b""#);
+            assert_eq!(always_quoted(r"ends\"), r#""ends\\""#);
+        }
+    }
 }
 
 #[cfg(test)]

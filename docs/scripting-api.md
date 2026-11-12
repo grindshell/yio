@@ -4,7 +4,7 @@ The reference for writing `.yio` scripts: the syntax, the keywords, and every bu
 
 Where scripts live and when they run is in [plugins.md](plugins.md). Why the language is shaped this way is in [scripting-language.md](scripting-language.md).
 
-The tables of keywords and built-ins below are also what `yio` draws when it is run in this directory. See [yio.md](yio.md).
+The tables of keywords and built-ins below are also what `yio search` draws when it is run in this directory. See [yio.md](yio.md).
 
 ## A script at a glance
 
@@ -117,13 +117,15 @@ Each of these records what it looked at. That record is how `yio` knows when a c
 - A missing file or directory is an error for `list-dir`, `read-file`, and `file-size`. For `is-file` and `is-dir` it is simply neither.
 - A listing changes when a name is added, removed, or renamed, not when a file inside is edited.
 
-### Environment
+### The run
 
 | Call | Gives | Records |
 | --- | --- | --- |
 | `(env name)` | An environment variable's value, or `()` if it is unset | The value |
+| `(args)` | A list of the command-line words that are for the script's `yio.md` | The words |
 
-In a plugin this is also how the built-in flags are read: `(env "YIO_CACHE")` is `"true"` or `"false"`.
+- In a plugin, `env` is also how the built-in flags are read: `(env "YIO_CACHE")` is `"true"` or `"false"`.
+- `args` gives the command line as typed, without the built-in flags: for `yio search -V file path` it is `("search" "file" "path")`. Where the plugin's `yio.md` is embedded in another, it gives only what follows the command it is embedded under. See "What plugins are told" in [plugins.md](plugins.md).
 
 ### Changing files
 

@@ -67,8 +67,9 @@ An input is one thing a result depended on, recorded narrowly so that only a cha
 | What a path is | File, directory, something else, or missing | It appears, disappears, or changes type |
 | A file's size | The size | The size differs. Content of the same size does not count. |
 | An environment variable | Hash of the value, or that it was unset | The value differs |
+| The arguments a plugin was told | Hash of the words | Any word differs, or their number or order |
 
-The last three are settled by one `stat` or one environment lookup. Files and listings follow the steps below, which are written for a file; a listing is the same with the directory re-listed instead of the file re-read.
+What a path is and a file's size are settled by one `stat`, and the last two without touching the disk. Files and listings follow the steps below, which are written for a file; a listing is the same with the directory re-listed instead of the file re-read.
 
 Each unit also stores an **as-of time**, taken at the start of the run that recorded its inputs, before any of them was read.
 
@@ -100,9 +101,11 @@ A script that changes something it looked at earlier in the same run invalidates
 
 The first run sees no file and makes one. Its record says "there was no `config.txt`", which is no longer true, so the next run is not replayed: it sees the file and records that instead. From then on it is replayed, until the file is deleted. A script that changes its own input on every run, such as one that appends to a file it reads, never settles and runs every time, which is what such a script needs.
 
-### Flags a script reads
+### Flags and arguments a script reads
 
-A `YIO_*` variable a script reads is one of its inputs, like any environment variable. A value computed during `yio --cache` by a script that read `YIO_CACHE` is therefore not reused by a normal run, where that variable differs: the script runs once more and that result is stored. A script that reads no such variable is replayed from the first normal run on.
+The command-line words a script reads with `(args)` are one of its inputs, so its result is reused only for the same words. The cache keeps one result per plugin: a different command line replaces it.
+
+A `YIO_*` variable a script reads is an input too, like any environment variable. A value computed during `yio --cache` by a script that read `YIO_CACHE` is therefore not reused by a normal run, where that variable differs: the script runs once more and that result is stored. A script that reads no such variable is replayed from the first normal run on.
 
 ## File format
 
@@ -119,7 +122,7 @@ so a cache file is `(cache #5120:` followed by 5120 bytes and `)`. The cache loa
 Payload, with all integers fixed-width little-endian (no varint branching) and strings as a `u32` length plus UTF-8 (`src/bytes.rs`):
 
 ```
-u8   format version (currently 3)
+u8   format version (currently 4)
 str  yio version
 u32  unit count
 unit:

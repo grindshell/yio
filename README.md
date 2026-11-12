@@ -83,7 +83,7 @@ describes one.
 | `[NAME]` in a heading | An optional argument. |
 | `[...NAME]` last in a heading | Takes all the arguments that are left, as the bash array `NAME`. |
 | `**FLAGS**` and a list | Named flags, each with `flags`, and optionally `type`, `default`, and `description`. |
-| A paragraph that is only a link to another `yio.md` | Embeds that file: its commands nest under the heading. |
+| A paragraph that is only a link to another `yio.md` | Embeds that file: its commands nest under the heading. With `#anchor`, only the command under that heading. |
 
 Arguments and flags reach the script as environment variables, under the name exactly as written. A `[...NAME]` argument is a list, so it reaches the script as a bash array instead:
 
@@ -146,14 +146,14 @@ lore/a.md  19         draft
 lore/b.md  15
 ```
 
-This repository has a working one. Run `yio` in [docs/](docs/yio.md) and a plugin draws the scripting API as a table, read out of the reference itself. Set `API` to filter it:
+Plugins are told the command line: a bash plugin as `"$@"`, a `.yio` plugin through `(args)`. This repository has a working one. In [docs/](docs/yio.md), a plugin answers the `search` command by drawing the scripting API as a table, read out of the reference itself:
+
+```bash
+yio search dir path
+```
 
 ```
-API=dir yio
-```
-
-```
-5 of 53 calls mention "dir"
+5 of 54 calls mention: dir path
 Call               Group           Gives
 -----------------  --------------  ---------------------------------------------------------------
 (list-dir [path])  Reading files   The entries of a directory, sorted by name
@@ -162,7 +162,6 @@ Call               Group           Gives
 (move from to)     Changing files  Moves a file or directory and gives the new path
 (remove path)      Changing files  Removes a file or an empty directory and gives ()
 ```
-
 ## The cache
 
 ```bash

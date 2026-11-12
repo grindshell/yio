@@ -1,11 +1,24 @@
 -- Draws the scripting API as one table, read out of scripting-api.md so
 -- that the table and the document cannot drift apart.
 --
---   yio             every keyword and built-in
---   API=file yio    only the rows that mention "file"
+--   yio search             every keyword and built-in
+--   yio search file path   only the rows that mention both words
+--
+-- This is what answers the `search` command of the yio.md beside it. A
+-- plugin is told the part of the command line that is for its yio.md, so
+-- it works the same where that file is embedded: `yio docs search file`.
 
--- Unset is (), which is false, so everything is kept.
-(var wanted (env "API"))
+(var words (args))
+
+-- Stay out of the way of every other command, and of `--help`.
+(if (or (not (= (first words) "search")) (= (env "YIO_HELP") "true"))
+  return)
+
+-- What follows `search`, apart from the `--` that ends the flags.
+(var terms (filter (rest words) (fn (word) (not (= word "--")))))
+
+(fn mentions-every-term (text)
+  (is-empty (filter terms (fn (term) (not (contains text term))))))
 
 -- A row of the document's tables that describes a call starts like this.
 (var marker "| `(")
@@ -27,18 +40,20 @@
       (do
         (set total (+ total 1))
         (var row (list (cell line 1) group (cell line 2)))
-        (if (or (not wanted) (contains (join row " ") wanted))
+        (if (mentions-every-term (join row " "))
           (set rows (append rows row)))))))
 
+(var wanted (join terms " "))
+
 (if (is-empty rows)
-  (return (str "None of the " total " calls mention \"" wanted "\"")))
+  (return (str "None of the " total " calls mention: " wanted)))
 
 (fn column (header index)
   (col-def header (map rows (fn (row) (nth row index)))))
 
 (list
-  (if wanted
-    (str (len rows) " of " total " calls mention \"" wanted "\""))
+  (if (not (is-empty terms))
+    (str (len rows) " of " total " calls mention: " wanted))
   (col
     (column "Call" 0)
     (column "Group" 1)

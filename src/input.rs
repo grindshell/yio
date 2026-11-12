@@ -54,6 +54,8 @@ pub enum Input {
     Size { path: String, size: u64 },
     /// The value of an environment variable. `None` means it was unset.
     Env { name: String, hash: Option<u64> },
+    /// The command-line arguments a plugin was told.
+    Args { hash: u64 },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -129,18 +131,46 @@ pub fn file_size(path: &Path) -> io::Result<(u64, Input)> {
     Ok((size, Input::Size { path: spell(path), size }))
 }
 
-/// Variables that are looked up ahead of the real environment: the `YIO_*`
-/// values of the current run.
-pub type Vars<'a> = &'a [(&'a str, String)];
+/// What a plugin is told about the run it is part of.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Vars<'a> {
+    /// Variables that are looked up ahead of the real environment: the
+    /// `YIO_*` values of the current run.
+    pub env: &'a [(&'a str, String)],
+    /// The command-line arguments that are for the plugin's `yio.md`.
+    pub args: &'a [String],
+}
+
+impl Vars<'_> {
+    /// Nothing told: the real environment and no arguments.
+    #[cfg(test)]
+    pub const NONE: Vars<'static> = Vars { env: &[], args: &[] };
+}
 
 /// Reads an environment variable, preferring `vars`.
 pub fn env_var(name: &str, vars: Vars) -> (Option<String>, Input) {
-    let value = match vars.iter().find(|(known, _)| *known == name) {
+    let value = match vars.env.iter().find(|(known, _)| *known == name) {
         Some((_, value)) => Some(value.clone()),
         None => std::env::var_os(name).map(|value| value.to_string_lossy().into_owned()),
     };
     let hash = value.as_ref().map(|value| hash(value.as_bytes()));
     (value, Input::Env { name: name.to_string(), hash })
+}
+
+/// The command-line arguments in `vars`.
+pub fn args<'a>(vars: Vars<'a>) -> (&'a [String], Input) {
+    (vars.args, Input::Args { hash: args_hash(vars.args) })
+}
+
+fn args_hash(args: &[String]) -> u64 {
+    // No argument contains a NUL, so ending each with one keeps `a b` and
+    // `ab` apart, and an empty argument from none at all.
+    let mut bytes = Vec::new();
+    for arg in args {
+        bytes.extend_from_slice(arg.as_bytes());
+        bytes.push(0);
+    }
+    hash(&bytes)
 }
 
 // Changes. Each of these alters the outside world and hands back an input
@@ -396,6 +426,7 @@ fn verdict(input: &Input, as_of: u64, vars: Vars) -> Verdict {
             let (_, current) = env_var(name, vars);
             clean_if(matches!(current, Input::Env { hash, .. } if hash == *expected))
         }
+        Input::Args { hash: expected } => clean_if(args_hash(vars.args) == *expected),
     }
 }
 
@@ -427,7 +458,7 @@ mod tests {
         let Input::File { path, size, mtime, hash } = recorded else { unreachable!() };
         let recorded = Input::File { path, size, mtime, hash: hash ^ 1 };
         let as_of = THEN + 10 * SECOND;
-        assert_eq!(check(&[recorded], as_of, as_of + SECOND, &[]), Freshness::Clean);
+        assert_eq!(check(&[recorded], as_of, as_of + SECOND, Vars::NONE), Freshness::Clean);
     }
 
     #[test]
@@ -438,15 +469,15 @@ mod tests {
         let now = as_of + 100 * SECOND;
 
         fs::write(&path, "longer").unwrap();
-        assert_eq!(check(std::slice::from_ref(&recorded), as_of, now, &[]), Freshness::Dirty);
+        assert_eq!(check(std::slice::from_ref(&recorded), as_of, now, Vars::NONE), Freshness::Dirty);
 
         // Same size, later time: only the contents show the change.
         fs::write(&path, "two").unwrap();
         set_mtime(&path, THEN + 50 * SECOND);
-        assert_eq!(check(std::slice::from_ref(&recorded), as_of, now, &[]), Freshness::Dirty);
+        assert_eq!(check(std::slice::from_ref(&recorded), as_of, now, Vars::NONE), Freshness::Dirty);
 
         fs::remove_file(&path).unwrap();
-        assert_eq!(check(&[recorded], as_of, now, &[]), Freshness::Dirty);
+        assert_eq!(check(&[recorded], as_of, now, Vars::NONE), Freshness::Dirty);
     }
 
     #[test]
@@ -461,11 +492,11 @@ mod tests {
         let Input::File { size, hash, .. } = recorded else { unreachable!() };
         let settled = Input::File { path: path.clone(), size, mtime: touched, hash };
         assert_eq!(
-            check(std::slice::from_ref(&recorded), as_of, touched + 10 * SECOND, &[]),
+            check(std::slice::from_ref(&recorded), as_of, touched + 10 * SECOND, Vars::NONE),
             Freshness::Settled(vec![settled])
         );
         // Too recent: clean, but recording it would not help yet.
-        assert_eq!(check(&[recorded], as_of, touched + SECOND, &[]), Freshness::Clean);
+        assert_eq!(check(&[recorded], as_of, touched + SECOND, Vars::NONE), Freshness::Clean);
     }
 
     #[test]
@@ -477,13 +508,13 @@ mod tests {
         let as_of = THEN + SECOND;
         let later = THEN + 100 * SECOND;
         assert_eq!(
-            check(std::slice::from_ref(&recorded), as_of, later, &[]),
+            check(std::slice::from_ref(&recorded), as_of, later, Vars::NONE),
             Freshness::Settled(vec![recorded.clone()])
         );
 
         fs::write(&path, "two").unwrap();
         set_mtime(&path, THEN);
-        assert_eq!(check(&[recorded], as_of, later, &[]), Freshness::Dirty);
+        assert_eq!(check(&[recorded], as_of, later, Vars::NONE), Freshness::Dirty);
     }
 
     #[test]
@@ -513,21 +544,21 @@ mod tests {
         let now = as_of + 100 * SECOND;
         let (names, recorded) = list_dir(&dir).unwrap();
         assert_eq!(names, ["a.md", "b.md"]);
-        assert_ne!(check(std::slice::from_ref(&recorded), as_of, now, &[]), Freshness::Dirty);
+        assert_ne!(check(std::slice::from_ref(&recorded), as_of, now, Vars::NONE), Freshness::Dirty);
 
         // Editing a file in the directory does not change the listing.
         fs::write(dir.join("a.md"), "edited").unwrap();
-        assert_ne!(check(std::slice::from_ref(&recorded), as_of, now, &[]), Freshness::Dirty);
+        assert_ne!(check(std::slice::from_ref(&recorded), as_of, now, Vars::NONE), Freshness::Dirty);
 
         fs::write(dir.join("c.md"), "c").unwrap();
-        assert_eq!(check(std::slice::from_ref(&recorded), as_of, now, &[]), Freshness::Dirty);
+        assert_eq!(check(std::slice::from_ref(&recorded), as_of, now, Vars::NONE), Freshness::Dirty);
 
         // Back to the same names: unchanged, though it took a re-listing.
         fs::remove_file(dir.join("c.md")).unwrap();
-        assert_ne!(check(std::slice::from_ref(&recorded), as_of, now, &[]), Freshness::Dirty);
+        assert_ne!(check(std::slice::from_ref(&recorded), as_of, now, Vars::NONE), Freshness::Dirty);
 
         fs::remove_dir_all(&dir).unwrap();
-        assert_eq!(check(&[recorded], as_of, now, &[]), Freshness::Dirty);
+        assert_eq!(check(&[recorded], as_of, now, Vars::NONE), Freshness::Dirty);
     }
 
     #[test]
@@ -541,7 +572,7 @@ mod tests {
         let Input::Dir { path, mtime, hash } = recorded else { unreachable!() };
         let recorded = Input::Dir { path, mtime, hash: hash ^ 1 };
         let as_of = mtime + 10 * SECOND;
-        assert_eq!(check(&[recorded], as_of, as_of + SECOND, &[]), Freshness::Clean);
+        assert_eq!(check(&[recorded], as_of, as_of + SECOND, Vars::NONE), Freshness::Clean);
     }
 
     #[test]
@@ -557,7 +588,7 @@ mod tests {
             let as_of = super::now();
             let (_, recorded) = list_dir(&dir).unwrap();
             fs::write(dir.join("b.md"), "b").unwrap();
-            let fresh = check(&[recorded], as_of, as_of + 100 * SECOND, &[]);
+            let fresh = check(&[recorded], as_of, as_of + 100 * SECOND, Vars::NONE);
             assert_eq!(fresh, Freshness::Dirty, "round {round}");
         }
     }
@@ -570,7 +601,7 @@ mod tests {
         let later = as_of + 100 * SECOND;
         let written = write_file(&path, b"one").unwrap();
         assert_eq!(fs::read(&path).unwrap(), b"one");
-        let fresh = || check(std::slice::from_ref(&written), as_of, later, &[]);
+        let fresh = || check(std::slice::from_ref(&written), as_of, later, Vars::NONE);
         assert_ne!(fresh(), Freshness::Dirty);
 
         // Edited by hand, or deleted: what was made is no longer there.
@@ -599,14 +630,14 @@ mod tests {
         let dir = scratch.path("a/b");
         let made = make_dir(&dir).unwrap();
         assert_eq!(made, make_dir(&dir).unwrap());
-        assert_eq!(check(std::slice::from_ref(&made), 0, 0, &[]), Freshness::Clean);
+        assert_eq!(check(std::slice::from_ref(&made), 0, 0, Vars::NONE), Freshness::Clean);
 
         let file = scratch.write("a/b/file", "x");
         // A directory with something in it is not removed.
         assert!(remove(&dir).is_err());
         let gone = remove(&file).unwrap();
         assert!(!file.exists());
-        assert_eq!(check(std::slice::from_ref(&gone), 0, 0, &[]), Freshness::Clean);
+        assert_eq!(check(std::slice::from_ref(&gone), 0, 0, Vars::NONE), Freshness::Clean);
         // Removing what is already gone is fine.
         assert_eq!(remove(&file).unwrap(), gone);
 
@@ -614,11 +645,11 @@ mod tests {
         // holds.
         remove(&dir).unwrap();
         assert!(!dir.exists());
-        assert_eq!(check(&[made], 0, 0, &[]), Freshness::Dirty);
+        assert_eq!(check(&[made], 0, 0, Vars::NONE), Freshness::Dirty);
 
         // If what was removed comes back, the removal no longer holds.
         scratch.write("a/b/file", "back");
-        assert_eq!(check(&[gone], 0, 0, &[]), Freshness::Dirty);
+        assert_eq!(check(&[gone], 0, 0, Vars::NONE), Freshness::Dirty);
     }
 
     #[test]
@@ -639,7 +670,7 @@ mod tests {
         assert_eq!(fs::read(&moved).unwrap(), b"payload");
         assert!(matches!(left, Input::Kind { kind: PathKind::Missing, .. }));
         assert!(matches!(arrived, Input::Kind { kind: PathKind::File, .. }));
-        assert_eq!(check(&[left, arrived], 0, 0, &[]), Freshness::Clean);
+        assert_eq!(check(&[left, arrived], 0, 0, Vars::NONE), Freshness::Clean);
         // There is nothing left to move a second time.
         assert!(move_path(&to, &moved).is_err());
     }
@@ -655,14 +686,14 @@ mod tests {
         }
         let as_of = THEN + 10 * SECOND;
         let now = as_of + 100 * SECOND;
-        assert_eq!(check(&recorded, as_of, now, &[]), Freshness::Clean);
+        assert_eq!(check(&recorded, as_of, now, Vars::NONE), Freshness::Clean);
 
         // One touched file, wherever it is in the list, is noticed and the
         // refreshed list keeps the original order.
         for touched in [0, count / 2, count - 1] {
             let path = scratch.path(&format!("f{touched:04}.txt"));
             set_mtime(&path, THEN + 50 * SECOND);
-            let Freshness::Settled(current) = check(&recorded, as_of, now, &[]) else {
+            let Freshness::Settled(current) = check(&recorded, as_of, now, Vars::NONE) else {
                 panic!("expected the touched file {touched} to settle");
             };
             assert_eq!(current.len(), count);
@@ -677,11 +708,11 @@ mod tests {
             let path = scratch.path(&format!("f{changed:04}.txt"));
             let original = fs::read(&path).unwrap();
             fs::write(&path, "something else entirely").unwrap();
-            assert_eq!(check(&recorded, as_of, now, &[]), Freshness::Dirty, "file {changed}");
+            assert_eq!(check(&recorded, as_of, now, Vars::NONE), Freshness::Dirty, "file {changed}");
             fs::write(&path, original).unwrap();
             set_mtime(&path, THEN);
         }
-        assert_eq!(check(&recorded, as_of, now, &[]), Freshness::Clean);
+        assert_eq!(check(&recorded, as_of, now, Vars::NONE), Freshness::Clean);
     }
 
     #[test]
@@ -723,19 +754,19 @@ mod tests {
         let path = scratch.path("thing");
         let (kind, missing) = path_kind(&path);
         assert_eq!(kind, PathKind::Missing);
-        assert_eq!(check(std::slice::from_ref(&missing), 0, 0, &[]), Freshness::Clean);
+        assert_eq!(check(std::slice::from_ref(&missing), 0, 0, Vars::NONE), Freshness::Clean);
 
         fs::write(&path, "x").unwrap();
-        assert_eq!(check(&[missing], 0, 0, &[]), Freshness::Dirty);
+        assert_eq!(check(&[missing], 0, 0, Vars::NONE), Freshness::Dirty);
         let (kind, is_file) = path_kind(&path);
         assert_eq!(kind, PathKind::File);
         // Contents are not part of what was observed.
         fs::write(&path, "different").unwrap();
-        assert_eq!(check(std::slice::from_ref(&is_file), 0, 0, &[]), Freshness::Clean);
+        assert_eq!(check(std::slice::from_ref(&is_file), 0, 0, Vars::NONE), Freshness::Clean);
 
         fs::remove_file(&path).unwrap();
         fs::create_dir(&path).unwrap();
-        assert_eq!(check(&[is_file], 0, 0, &[]), Freshness::Dirty);
+        assert_eq!(check(&[is_file], 0, 0, Vars::NONE), Freshness::Dirty);
         assert_eq!(path_kind(&path).0, PathKind::Dir);
     }
 
@@ -746,25 +777,25 @@ mod tests {
         let (size, recorded) = file_size(&path).unwrap();
         assert_eq!(size, 5);
         fs::write(&path, "abcde").unwrap();
-        assert_eq!(check(std::slice::from_ref(&recorded), 0, 0, &[]), Freshness::Clean);
+        assert_eq!(check(std::slice::from_ref(&recorded), 0, 0, Vars::NONE), Freshness::Clean);
         fs::write(&path, "abcdef").unwrap();
-        assert_eq!(check(&[recorded], 0, 0, &[]), Freshness::Dirty);
+        assert_eq!(check(&[recorded], 0, 0, Vars::NONE), Freshness::Dirty);
         assert!(file_size(&scratch.path("missing")).is_err());
         assert!(file_size(scratch.root()).is_err());
     }
 
     #[test]
     fn an_environment_variable_changes_when_its_value_does() {
-        let (value, set) = env_var("PATH", &[]);
+        let (value, set) = env_var("PATH", Vars::NONE);
         assert!(value.is_some());
-        assert_eq!(check(std::slice::from_ref(&set), 0, 0, &[]), Freshness::Clean);
+        assert_eq!(check(std::slice::from_ref(&set), 0, 0, Vars::NONE), Freshness::Clean);
         let other = Input::Env { name: "PATH".to_string(), hash: Some(1) };
-        assert_eq!(check(&[other], 0, 0, &[]), Freshness::Dirty);
+        assert_eq!(check(&[other], 0, 0, Vars::NONE), Freshness::Dirty);
         let gone = Input::Env { name: "PATH".to_string(), hash: None };
-        assert_eq!(check(&[gone], 0, 0, &[]), Freshness::Dirty);
+        assert_eq!(check(&[gone], 0, 0, Vars::NONE), Freshness::Dirty);
 
-        let (value, unset) = env_var("YIO_TEST_SURELY_UNSET_VARIABLE", &[]);
+        let (value, unset) = env_var("YIO_TEST_SURELY_UNSET_VARIABLE", Vars::NONE);
         assert_eq!(value, None);
-        assert_eq!(check(&[unset], 0, 0, &[]), Freshness::Clean);
+        assert_eq!(check(&[unset], 0, 0, Vars::NONE), Freshness::Clean);
     }
 }

@@ -35,7 +35,7 @@ A Rust crate (edition 2024) with no dependencies. It loads `yio.md` and the file
 | `docs/scripting-language.md` | Why the language is the way it is, how it is implemented, decisions |
 | `docs/plugins.md` | Which files are plugins, when they run, what they are told |
 | `docs/cache.md` | What is cached, how staleness is detected, the file format, measurements |
-| `docs/yio.md`, `docs/.yio/pre/0000_api.yio` | A working example: a plugin that draws `docs/scripting-api.md` as a filterable table |
+| `docs/yio.md`, `docs/.yio/pre/0000_api.yio` | A working example: `yio search WORDS` in `docs/`, answered by a plugin that draws `docs/scripting-api.md` as a table |
 | `README.md` | The introduction for users |
 | `.github/workflows/ci.yml` | Builds, tests, and lints on Linux, macOS, and Windows for pushes and pull requests |
 | `.github/workflows/release.yml` | On a `v*` tag, creates a GitHub release and attaches a binary archive per platform |
@@ -78,7 +78,7 @@ Set the new version in `Cargo.toml`, commit, then tag that commit `v` plus the v
 - **Optional arguments**: `[MY_ARGUMENT_NAME]` in the heading. The script decides whether the variable holds a value.
 - **The rest of the arguments**: `[...MY_LIST_NAME]` as the last argument in the heading takes every argument the others leave, from none to many, so that `yio docs search built-in functions` works. Only for a command with no optional arguments and no subcommands. The script gets a bash array named `MY_LIST_NAME`, not an environment variable.
 - **Named flags**: a paragraph containing `**FLAGS**`, immediately followed (newline optional) by a `-` delimited list. Each top-level item is one flag. Sub-items configure it with the keys `flags`, `type`, `default`, and `description`. Only `flags` is mandatory, the type defaults to string, and flags may have default values (unlike `mask`).
-- **Embedding**: when a relative link to a file named `yio.md` is the only content of a heading's paragraph, that file is loaded in place as part of the same run and its commands nest under the heading. No second `yio` process is spawned. Embedded scripts run in their own file's directory. See `docs/embedding.md`.
+- **Embedding**: when a relative link to a file named `yio.md` is the only content of a heading's paragraph, that file is loaded in place as part of the same run and its commands nest under the heading. No second `yio` process is spawned. Embedded scripts run in their own file's directory. A link that ends in a heading's anchor (`docs/yio.md#search-terms`) embeds only that command. A file cannot embed itself, in whole or in part, directly or through other files. See `docs/embedding.md`.
 
 Arguments and flags are injected into the script's environment under the name exactly as written. There is no automatic case conversion. Because Windows environment names are case-insensitive, names within one command must be unique ignoring case.
 
@@ -161,6 +161,7 @@ Local to the current working directory, next to the `yio.md` it belongs to.
 - The extension picks the runner: `.bash` for bash scripts, `.yio` for the yio scripting language (below).
 - Plugins run at cache time by default. A plugin that should not must opt out itself by checking `YIO_CACHE`.
 - `pre/` plugins run before the `yio.md` is read; `post/` plugins run once the command tree is ready, before anything is listed or run. An embedded directory's plugins run too. See `docs/plugins.md`.
+- Plugins are told the built-in flags as `YIO_*` variables and the rest of the command line as arguments: `"$@"` in bash, `(args)` in the scripting language. An embedded directory's plugins get only what follows the command its `yio.md` is embedded under.
 
 ## Scripting language
 

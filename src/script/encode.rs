@@ -137,7 +137,7 @@ mod tests {
 
     /// Runs a script, stores its value, reads it back, and prints both.
     fn round_trip(source: &str) -> (String, Result<String, String>) {
-        script::run(source.as_bytes(), Path::new(""), &[], |outcome| {
+        script::run(source.as_bytes(), Path::new(""), crate::input::Vars::NONE, |outcome| {
             let stored = encode(&outcome.value);
             let restored = stored.map(|bytes| {
                 let value = decode(&bytes).unwrap();
@@ -200,7 +200,7 @@ mod tests {
         let bytes = script::run(
             br#"(list 1 "two" (col (col-def "A" (list true #2:xy))))"#,
             Path::new(""),
-            &[],
+            crate::input::Vars::NONE,
             |outcome| encode(&outcome.value).unwrap(),
         )
         .unwrap();

@@ -1,13 +1,17 @@
 # Docs
 
-> The scripting API as a table, straight from scripting-api.md
+> Tasks for the documentation in this directory
 
-This directory demonstrates a `yio` plugin. Before anything else, every `yio` run here draws a table of the scripting language's keywords and built-in functions. The plugin that draws it is `.yio/pre/0000_api.yio`, and it reads the rows out of `scripting-api.md`, so the table is never behind the document.
+## search [...TERMS]
 
-Set `API` to keep only the rows that mention some text, in the call, the group, or the description:
+> Show the scripting API, or only the calls that mention every word
 
-    API=file yio
+This command does not draw the table. A plugin, `.yio/pre/0000_api.yio`, does, before the command runs. A plugin is told the command line, so it sees `search` and the words after it, and it reads the rows out of `scripting-api.md`, so the table is never behind the document.
 
-In PowerShell that is `$env:API = 'file'; yio`. Matching is exact, so `File` and `file` differ.
+A row is kept when the call, its group, or its description mentions every word. Matching is exact, so `File` and `file` differ.
 
-Run `yio --cache` once and the table is replayed from `.yio/cache.yio` without running the plugin, until `scripting-api.md`, the plugin, or `API` changes.
+With a cache (`yio --cache`), repeating a search replays the table without running the plugin, until `scripting-api.md` or the plugin changes.
+
+```bash
+# Nothing left to do: the plugin has already drawn the table.
+```

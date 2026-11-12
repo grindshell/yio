@@ -19,7 +19,7 @@ Functions are the one kind of value with no stored form, so a script whose resul
 
 ## Every built-in records what it looked at
 
-A built-in that looks at the outside world records what it saw: the contents of a file, the names in a directory, what a path is, the value of an environment variable. That list is stored with the script's value. The script is then a pure function of its recorded inputs, which is the property that makes replay correct.
+A built-in that looks at the outside world records what it saw: the contents of a file, the names in a directory, what a path is, the value of an environment variable, the words of the command line. That list is stored with the script's value. The script is then a pure function of its recorded inputs, which is the property that makes replay correct.
 
 Inputs are recorded narrowly, so that only a change that could alter the result counts. `file-size` records the size, not the contents. `list-dir` records the names, so editing a file inside does not rerun a script that only listed the directory.
 
@@ -82,6 +82,7 @@ Every value except a function has a binary encoding of one tag byte plus payload
 | Is reassignment (`set`) allowed? | Yes |
 | Is a script's output its final value, drawn by `yio`? | Yes |
 | May scripts read or write outside the directory of their `yio.md`? | Read anywhere, change only inside |
+| What is a plugin told of the command line? | The words as typed, without the built-in flags, from where its `yio.md` is embedded |
 | Does "compressed AST" mean a compact encoding or real compression? | A compact encoding |
 | Does a dirty cache refresh itself, or only on `--cache`? | It refreshes itself |
 | With a cache, do `.bash` plugins still run on every access? | Yes |
@@ -90,5 +91,4 @@ Every value except a function has a binary encoding of one tag byte plus payload
 ## Not done
 
 - Removing a directory and its contents in one call.
-- Telling a plugin which command was named, or its arguments.
 - Text functions that ignore case.

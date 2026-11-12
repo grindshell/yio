@@ -101,7 +101,7 @@ mod tests {
 
     /// Runs a script and renders its value.
     fn rendered(source: &str) -> Result<String, String> {
-        script::run(source.as_bytes(), Path::new(""), &[], |outcome| super::render(&outcome.value))
+        script::run(source.as_bytes(), Path::new(""), crate::input::Vars::NONE, |outcome| super::render(&outcome.value))
             .unwrap_or_else(|error| panic!("{source}\nfailed: {error}"))
     }
 
