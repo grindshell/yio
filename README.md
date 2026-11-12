@@ -81,10 +81,25 @@ describes one.
 | A fenced code block | The script. It always runs with `bash`; the `bash` tag is optional. A heading may have several, each run in its own process. |
 | `(NAME)` in a heading | A required argument. |
 | `[NAME]` in a heading | An optional argument. |
+| `[...NAME]` last in a heading | Takes all the arguments that are left, as the bash array `NAME`. |
 | `**FLAGS**` and a list | Named flags, each with `flags`, and optionally `type`, `default`, and `description`. |
 | A paragraph that is only a link to another `yio.md` | Embeds that file: its commands nest under the heading. |
 
-Arguments and flags reach the script as environment variables, under the name exactly as written.
+Arguments and flags reach the script as environment variables, under the name exactly as written. A `[...NAME]` argument is a list, so it reaches the script as a bash array instead:
+
+````markdown
+## search [...TERMS]
+
+> Search the notes for some words
+
+```bash
+grep -rn -- "${TERMS[*]}" notes/
+```
+````
+
+```bash
+yio search built-in functions
+```
 
 Every command also accepts these flags:
 

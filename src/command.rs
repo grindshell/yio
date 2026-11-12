@@ -12,6 +12,10 @@ pub struct Command {
     /// Paragraph text, shown with `--verbose`.
     pub long_help: Option<String>,
     pub params: Vec<Param>,
+    /// The name of the `[...NAME]` argument, which takes every argument left
+    /// over once `params` are filled. A command that has one has no optional
+    /// arguments and no subcommands.
+    pub rest: Option<String>,
     pub flags: Vec<Flag>,
     /// Bodies of the code blocks, in order. Each runs in its own bash process.
     /// A command without any only groups subcommands.
@@ -42,9 +46,21 @@ impl Command {
     pub fn long_flag(&self, name: &str) -> Option<&Flag> {
         self.flags.iter().find(|flag| flag.long.as_deref() == Some(name))
     }
+
+    /// The heading's arguments as they are written: `(A) [B]` or
+    /// `(A) [...REST]`. Empty when there are none.
+    pub fn signature(&self) -> String {
+        let params = self.params.iter().map(|param| match param.required {
+            true => format!("({})", param.name),
+            false => format!("[{}]", param.name),
+        });
+        let rest = self.rest.iter().map(|name| format!("[...{name}]"));
+        params.chain(rest).collect::<Vec<_>>().join(" ")
+    }
 }
 
-/// A positional argument: `(NAME)` is required, `[NAME]` is optional.
+/// A positional argument that takes one value: `(NAME)` is required,
+/// `[NAME]` is optional.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Param {
     pub name: String,

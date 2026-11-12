@@ -116,7 +116,8 @@ fn run() -> Result<ExitCode, String> {
     if command.scripts.is_empty() {
         describe()
     } else {
-        run::run(&command.scripts, &invocation.env(), command.dir.as_deref())
+        let list = invocation.rest.as_ref().map(|(name, values)| (*name, values.as_slice()));
+        run::run(&command.scripts, &invocation.env(), list, command.dir.as_deref())
     }
 }
 

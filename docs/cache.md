@@ -119,7 +119,7 @@ so a cache file is `(cache #5120:` followed by 5120 bytes and `)`. The cache loa
 Payload, with all integers fixed-width little-endian (no varint branching) and strings as a `u32` length plus UTF-8 (`src/bytes.rs`):
 
 ```
-u8   format version (currently 2)
+u8   format version (currently 3)
 str  yio version
 u32  unit count
 unit:

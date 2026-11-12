@@ -1,5 +1,6 @@
 //! Runs bash.
 
+use std::borrow::Cow;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command as Process, ExitCode};
@@ -20,18 +21,54 @@ pub enum Script<'a> {
 ///
 /// The scripts run in `dir` when it is given, and in the current directory
 /// otherwise.
+///
+/// `list` is the name and values of a `[...NAME]` argument. Each script
+/// sees it as a bash array of that name.
 pub fn run(
     scripts: &[String],
     env: &[(&str, String)],
+    list: Option<(&str, &[String])>,
     dir: Option<&Path>,
 ) -> Result<ExitCode, String> {
+    let array = list.map(|(name, values)| array(name, values));
     for script in scripts {
-        let code = run_one(Script::Text(script), env, dir)?;
+        // The assignment goes on the script's first line, so that the line
+        // numbers in bash's error messages still match the code block.
+        let script = match &array {
+            Some(array) => Cow::Owned(format!("{array}; {script}")),
+            None => Cow::Borrowed(script.as_str()),
+        };
+        let code = run_one(Script::Text(&script), env, dir)?;
         if code != 0 {
             return Ok(ExitCode::from(code));
         }
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// The bash statement that makes `name` an array holding `values`.
+///
+/// A list cannot travel as an environment variable, which holds one string,
+/// so it is written into the script instead. Assigning it also replaces any
+/// variable of that name inherited from the calling shell.
+fn array(name: &str, values: &[String]) -> String {
+    let words: Vec<String> = values.iter().map(|value| quote(value)).collect();
+    format!("{name}=({})", words.join(" "))
+}
+
+/// `text` as a single-quoted POSIX shell word, which the shell takes
+/// literally whatever it contains.
+fn quote(text: &str) -> String {
+    let mut quoted = String::with_capacity(text.len() + 2);
+    quoted.push('\'');
+    for c in text.chars() {
+        match c {
+            '\'' => quoted.push_str("'\\''"),
+            c => quoted.push(c),
+        }
+    }
+    quoted.push('\'');
+    quoted
 }
 
 /// Runs one script and gives its exit code, which is zero on success.
@@ -101,7 +138,7 @@ mod wsl {
     use std::path::Path;
     use std::process::Command as Process;
 
-    use super::Script;
+    use super::{Script, quote};
 
     /// The launcher is the only `bash.exe` that lives in the system
     /// directory.
@@ -127,20 +164,6 @@ mod wsl {
         };
     }
 
-    /// `text` as a single-quoted POSIX shell word.
-    fn quote(text: &str) -> String {
-        let mut quoted = String::with_capacity(text.len() + 2);
-        quoted.push('\'');
-        for c in text.chars() {
-            match c {
-                '\'' => quoted.push_str("'\\''"),
-                c => quoted.push(c),
-            }
-        }
-        quoted.push('\'');
-        quoted
-    }
-
     /// The launcher only forwards the variables named in `WSLENV`. The loader
     /// reserves that name, so this never replaces a value from a `yio.md`.
     pub fn forward(process: &mut Process, env: &[(&str, String)]) {
@@ -154,14 +177,30 @@ mod wsl {
         process.env("WSLENV", names);
     }
 
-    #[cfg(test)]
-    mod tests {
-        use super::quote;
+}
 
-        #[test]
-        fn quotes_a_script_as_one_shell_word() {
-            assert_eq!(quote("echo \"$HOME\"\n"), "'echo \"$HOME\"\n'");
-            assert_eq!(quote("echo 'a b'"), "'echo '\\''a b'\\'''");
-        }
+#[cfg(test)]
+mod tests {
+    use super::{array, quote};
+
+    #[test]
+    fn quotes_text_as_one_shell_word() {
+        assert_eq!(quote("echo \"$HOME\"\n"), "'echo \"$HOME\"\n'");
+        assert_eq!(quote("echo 'a b'"), "'echo '\\''a b'\\'''");
+    }
+
+    #[test]
+    fn writes_a_list_as_a_bash_array() {
+        let list = |values: &[&str]| {
+            let values: Vec<String> = values.iter().map(|value| value.to_string()).collect();
+            array("TERMS", &values)
+        };
+        assert_eq!(list(&[]), "TERMS=()");
+        assert_eq!(list(&["built-in", "functions"]), "TERMS=('built-in' 'functions')");
+        // Nothing in a value is left for bash to expand or split.
+        assert_eq!(
+            list(&["two words", "$HOME", "it's", "", "*"]),
+            "TERMS=('two words' '$HOME' 'it'\\''s' '' '*')"
+        );
     }
 }

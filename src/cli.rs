@@ -29,6 +29,10 @@ pub struct Invocation<'a> {
     /// declaration order. Anything not given on the command line has its
     /// default, or `"false"` for booleans, or an empty string.
     pub vars: Vec<(&'a str, String)>,
+    /// The name and values of the command's `[...NAME]` argument, when it
+    /// has one. The values are every argument left over after the others,
+    /// which may be none.
+    pub rest: Option<(&'a str, Vec<String>)>,
 }
 
 impl Invocation<'_> {
@@ -239,7 +243,14 @@ impl<'a, 'b> State<'a, 'b> {
         let command = self.command;
         let path = self.display_path();
 
-        if let Some(extra) = self.positionals.get(command.params.len()) {
+        // Whatever the other arguments leave over belongs to `[...NAME]`.
+        let rest = command.rest.as_deref().map(|name| {
+            let values = self.positionals.iter().skip(command.params.len());
+            (name, values.map(|value| value.to_string()).collect())
+        });
+        if rest.is_none()
+            && let Some(extra) = self.positionals.get(command.params.len())
+        {
             return Err(if command.params.is_empty() && !command.subcommands.is_empty() {
                 format!("unknown command `{extra}` for `{path}`")
             } else {
@@ -279,6 +290,7 @@ impl<'a, 'b> State<'a, 'b> {
             command,
             builtins: self.builtins,
             vars,
+            rest,
         })
     }
 
@@ -342,6 +354,23 @@ echo
 - YIO_VERBOSE
   - flags: -v --loud
   - type: boolean
+
+```
+echo
+```
+
+## search [...TERMS]
+
+**FLAGS**
+- EXACT
+  - flags: -e --exact
+  - type: boolean
+
+```
+echo
+```
+
+## tag (FILE) [...TAGS]
 
 ```
 echo
@@ -422,6 +451,42 @@ echo
         let (path, vars) = resolve(&root, "build -- clean");
         assert_eq!(path, "build");
         assert_eq!(vars[0], "TARGET=clean");
+    }
+
+    /// Parses `line` and returns the values of the `[...NAME]` argument.
+    fn rest(root: &Command, line: &str) -> (String, Vec<String>) {
+        let invocation = parse(root, &args(line)).unwrap();
+        let (name, values) = invocation.rest.expect("the command takes `[...NAME]`");
+        (name.to_string(), values)
+    }
+
+    #[test]
+    fn the_rest_argument_takes_what_the_others_leave() {
+        let root = tree();
+        let terms = |line: &str| rest(&root, line).1;
+        assert_eq!(rest(&root, "search built-in functions"), ("TERMS".to_string(), vec!["built-in".to_string(), "functions".to_string()]));
+        assert_eq!(terms("search one"), ["one"]);
+        // None at all is fine, and still a list.
+        assert_eq!(terms("search"), [""; 0]);
+
+        // The arguments before it are filled first and are not part of it.
+        let invocation = parse(&root, &args("tag notes.md draft lore")).unwrap();
+        assert_eq!(invocation.vars, [("FILE", "notes.md".to_string())]);
+        assert_eq!(invocation.rest, Some(("TAGS", vec!["draft".to_string(), "lore".to_string()])));
+        assert_eq!(rest(&root, "tag notes.md").1, [""; 0]);
+        let error = parse(&root, &args("tag")).unwrap_err();
+        assert_eq!(error, "missing required argument `(FILE)` for `yio tag`");
+
+        // Flags are still flags wherever they appear, until `--`.
+        assert_eq!(terms("search a -e b"), ["a", "b"]);
+        assert_eq!(resolve(&root, "search a -e b").1, ["EXACT=true"]);
+        assert_eq!(terms("search a -- -e --help b"), ["a", "-e", "--help", "b"]);
+        assert_eq!(resolve(&root, "search a -- -e").1, ["EXACT=false"]);
+        let error = parse(&root, &args("search a -x")).unwrap_err();
+        assert_eq!(error, "unknown flag `-x` for `yio search`");
+
+        // A command without one has no list.
+        assert_eq!(parse(&root, &args("build web")).unwrap().rest, None);
     }
 
     #[test]

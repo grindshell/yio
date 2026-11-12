@@ -253,6 +253,9 @@ impl<'a, 'c> Loader<'a, 'c> {
 
         let top = self.top();
         for command in embedded.subcommands {
+            if let Some(rest) = &top.command.rest {
+                return Err(err(line_no, &rest_with_subcommand(&top.command, rest, &command.name)));
+            }
             if top.command.subcommands.iter().any(|c| c.name == command.name) {
                 return Err(err(
                     line_no,
@@ -281,6 +284,9 @@ impl<'a, 'c> Loader<'a, 'c> {
         self.close_to(level);
         let command = command_heading(title).map_err(|m| err(line_no, &m))?;
         let parent = self.current();
+        if let Some(rest) = &parent.rest {
+            return Err(err(line_no, &rest_with_subcommand(parent, rest, &command.name)));
+        }
         if parent.subcommands.iter().any(|c| c.name == command.name) {
             return Err(err(
                 line_no,
@@ -384,7 +390,7 @@ impl<'a, 'c> Loader<'a, 'c> {
         for draft in drafts {
             let line_no = draft.line_no;
             let flag = draft.finish()?;
-            let names = command.params.iter().map(|p| &p.name);
+            let names = command.params.iter().map(|p| &p.name).chain(&command.rest);
             let mut names = names.chain(command.flags.iter().map(|f| &f.name));
             let clash = if let Some(existing) =
                 names.find(|name| name.eq_ignore_ascii_case(&flag.name))
@@ -414,6 +420,16 @@ impl<'a, 'c> Loader<'a, 'c> {
         }
         Ok(i)
     }
+}
+
+/// The error for a subcommand under a command that takes `[...REST]`. Every
+/// word after such a command is one of its arguments, so a subcommand could
+/// never be reached.
+fn rest_with_subcommand(parent: &Command, rest: &str, subcommand: &str) -> String {
+    format!(
+        "command `{}` takes `[...{rest}]`, so it cannot have the subcommand `{subcommand}`",
+        parent.name
+    )
 }
 
 /// A flag being read from a `**FLAGS**` list.
@@ -541,7 +557,8 @@ fn flag_names(value: &str) -> Result<(Option<char>, Option<String>), String> {
 }
 
 /// Parses the text of an H2-or-deeper heading: a command name followed by
-/// `(REQUIRED)` and `[OPTIONAL]` arguments.
+/// `(REQUIRED)` and `[OPTIONAL]` arguments, or by `(REQUIRED)` arguments and
+/// one `[...REST]`.
 fn command_heading(title: &str) -> Result<Command, String> {
     let mut tokens = title.split_whitespace();
     let name = tokens.next().ok_or("heading has no command name")?;
@@ -549,7 +566,11 @@ fn command_heading(title: &str) -> Result<Command, String> {
         return Err(format!("`{name}` is not a valid command name"));
     }
     let mut params: Vec<Param> = Vec::new();
+    let mut rest: Option<String> = None;
     for token in tokens {
+        if let Some(rest) = &rest {
+            return Err(format!("`[...{rest}]` must be the last argument, but `{token}` follows it"));
+        }
         let (inner, required) =
             if let Some(inner) = token.strip_prefix('(').and_then(|t| t.strip_suffix(')')) {
                 (inner, true)
@@ -557,9 +578,17 @@ fn command_heading(title: &str) -> Result<Command, String> {
                 (inner, false)
             } else {
                 return Err(format!(
-                    "unexpected `{token}` after command `{name}`; expected `(ARG)` or `[ARG]`"
+                    "unexpected `{token}` after command `{name}`; \
+                     expected `(ARG)`, `[ARG]`, or `[...ARGS]`"
                 ));
             };
+        let (inner, takes_rest) = match inner.strip_prefix("...") {
+            Some(inner) if !required => (inner, true),
+            Some(_) => {
+                return Err(format!("`{token}` is not an argument; the form is `[...ARGS]`"));
+            }
+            None => (inner, false),
+        };
         check_var_name(inner)?;
         if let Some(existing) = params.iter().find(|p| p.name.eq_ignore_ascii_case(inner)) {
             return Err(if existing.name == inner {
@@ -567,6 +596,18 @@ fn command_heading(title: &str) -> Result<Command, String> {
             } else {
                 same_ignoring_case(inner, &existing.name)
             });
+        }
+        if takes_rest {
+            // An optional argument before it would make it unclear which of
+            // the two a lone value is for.
+            if let Some(optional) = params.iter().find(|p| !p.required) {
+                return Err(format!(
+                    "`[...{inner}]` cannot be used with the optional argument `[{}]`",
+                    optional.name
+                ));
+            }
+            rest = Some(inner.to_string());
+            continue;
         }
         if required && params.last().is_some_and(|p| !p.required) {
             return Err(format!(
@@ -581,6 +622,7 @@ fn command_heading(title: &str) -> Result<Command, String> {
     Ok(Command {
         name: name.to_string(),
         params,
+        rest,
         ..Command::default()
     })
 }
@@ -781,6 +823,45 @@ rm -rf out/
         assert_eq!(clean.scripts, ["rm -rf out/\n"]);
         assert_eq!(clean.subcommands[0].name, "deep");
         assert!(root.subcommands[1].scripts.is_empty());
+    }
+
+    #[test]
+    fn reads_the_argument_that_takes_the_rest() {
+        let root = parse("## search [...TERMS]\n## tag (FILE) (KIND) [...TAGS]\n## plain (X)\n").unwrap();
+        let search = &root.subcommands[0];
+        assert_eq!(search.params, []);
+        assert_eq!(search.rest.as_deref(), Some("TERMS"));
+
+        let tag = &root.subcommands[1];
+        let names: Vec<_> = tag.params.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["FILE", "KIND"]);
+        assert_eq!(tag.rest.as_deref(), Some("TAGS"));
+        assert_eq!(tag.signature(), "(FILE) (KIND) [...TAGS]");
+
+        assert_eq!(root.subcommands[2].rest, None);
+    }
+
+    #[test]
+    fn rejects_a_misplaced_rest_argument() {
+        let cases = [
+            ("## a [...X] (Y)\n", "line 1: `[...X]` must be the last argument, but `(Y)` follows it"),
+            ("## a [...X] [...Y]\n", "line 1: `[...X]` must be the last argument, but `[...Y]` follows it"),
+            ("## a (X) [Y] [...Z]\n", "line 1: `[...Z]` cannot be used with the optional argument `[Y]`"),
+            ("## a (...X)\n", "line 1: `(...X)` is not an argument; the form is `[...ARGS]`"),
+            ("## a [...]\n", "line 1: `` is not a valid name"),
+            ("## a [...1X]\n", "line 1: `1X` is not a valid name"),
+            ("## a (X) [...x]\n", "line 1: `x` differs from `X` only by case"),
+            ("## a (X) [...X]\n", "line 1: argument `X` is defined twice"),
+            ("## a [...X]\n**FLAGS**\n- X\n  - flags: -x\n", "line 3: `X` is already used by command `a`"),
+            ("## a [...X]\n### b\n", "line 2: command `a` takes `[...X]`, so it cannot have the subcommand `b`"),
+            ("## a (W) [...X]\n```\necho\n```\n#### b\n", "line 5: command `a` takes `[...X]`, so it cannot have the subcommand `b`"),
+        ];
+        for (source, expected) in cases {
+            let error = parse(source).unwrap_err();
+            assert!(error.contains(expected), "{source:?} gave {error:?}");
+        }
+        // A sibling after it is not a subcommand.
+        assert!(parse("## a [...X]\n## b\n").is_ok());
     }
 
     #[test]
@@ -1065,5 +1146,25 @@ See [docs](docs/yio.md) for more.
         ])
         .unwrap_err();
         assert_eq!(error, "yio.md: line 5: command `build` is defined twice");
+    }
+
+    #[test]
+    fn a_command_that_takes_the_rest_cannot_embed_commands() {
+        let error = load_files(&[
+            ("yio.md", "## search [...TERMS]\n\n[docs](docs/yio.md)\n"),
+            ("docs/yio.md", "> Docs\n\n## build\n"),
+        ])
+        .unwrap_err();
+        assert_eq!(
+            error,
+            "yio.md: line 3: command `search` takes `[...TERMS]`, so it cannot have the subcommand `build`"
+        );
+        // An embedded file that only brings help text is fine.
+        let root = load_files(&[
+            ("yio.md", "## search [...TERMS]\n\n[docs](docs/yio.md)\n"),
+            ("docs/yio.md", "> Docs\n"),
+        ])
+        .unwrap();
+        assert_eq!(root.subcommands[0].short_help.as_deref(), Some("Docs"));
     }
 }

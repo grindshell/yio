@@ -19,6 +19,45 @@ Nothing about the commands is known at compile time, so there is no argument-par
 - **Flags are not inherited.** A flag belongs to the command it is defined on. Giving a parent's flag before a subcommand name (`yio build --release clean`) is an error rather than being dropped.
 - **Built-ins work anywhere**, at any depth and in any position. A command's own flags are looked up first, so a flag that reuses `-v` or the name `YIO_VERBOSE` replaces the built-in for that command.
 - **Arity is checked.** A missing `(REQUIRED)` argument and an argument beyond the declared ones are both errors. Required arguments cannot be declared after optional ones.
+- **`[...NAME]` takes the rest.** Once the required arguments are filled, every further argument goes to it. See below.
+
+## The rest of the arguments
+
+A heading may end with `[...NAME]`, which takes every argument that the ones before it leave over, from none to many:
+
+```markdown
+## search [...TERMS]
+
+## tag (FILE) [...TAGS]
+```
+
+`yio search built-in functions` gives `TERMS` two values. `yio tag notes.md draft lore` gives `FILE` the first argument and `TAGS` the other two. `yio search` alone is fine and gives an empty list.
+
+It is allowed only where it cannot be confused with anything else:
+
+- It must be the last argument in the heading, and there can be one.
+- The command may not have optional arguments. With `[A] [...B]` a missing `A` and an empty `B` could not be told apart from the script's side.
+- The command may not have subcommands, in its own file or through an embed. Every word after the command is one of its arguments, so a subcommand could never be reached.
+
+Flags are still recognized among the values, so `yio search -e built-in` sets the flag `-e`. A value that starts with `-` goes after `--`: `yio search -- -e`.
+
+### In the script
+
+An environment variable holds one string, so a list cannot be one. The script gets a bash array instead, under the name without the dots:
+
+```bash
+echo "${#TERMS[@]} terms"
+for term in "${TERMS[@]}"; do
+  grep -rn -- "$term" .
+done
+```
+
+- `"${TERMS[@]}"` is each value as its own word, and `"${TERMS[*]}"` is all of them joined with spaces.
+- Values arrive exactly as typed. Nothing in them is expanded or split, whatever they contain.
+- `yio` puts the array's assignment at the start of the code block's first line, so the line numbers in bash's error messages still match the block. Every code block of the command gets it.
+- The assignment replaces a variable of the same name inherited from the calling shell.
+- Being an array, it is not passed on to programs the script starts. Hand it over as arguments: `my-tool "${TERMS[@]}"`.
+- In bash older than 4.4, which includes the one macOS ships, expanding an empty array under `set -u` is an error. `${TERMS[@]+"${TERMS[@]}"}` avoids it.
 
 ## Help
 
@@ -70,6 +109,7 @@ Every argument and flag of the resolved command is set, so a script never sees a
 | Optional argument | empty string |
 | String flag | its `default`, else empty string |
 | Boolean flag | its `default`, else `false` |
+| `[...NAME]` | an empty bash array |
 
 `YIO_HELP`, `YIO_VERBOSE`, `YIO_CACHE`, and `YIO_REMOVE_CACHE` are always set to `true` or `false`, and `YIO_VERSION` to the CLI's version.
 
@@ -86,7 +126,7 @@ Names are injected exactly as written, but Windows treats environment variable n
 ## What the loader accepts
 
 - One optional H1, before any command. Its text is ignored; a blockquote and paragraphs under it describe the file as a whole.
-- A heading is one command name followed by `(ARG)` and `[ARG]` tokens. Argument and flag names must be valid environment variable names.
+- A heading is one command name followed by `(ARG)` and `[ARG]` tokens, optionally ending with `[...ARGS]` when there is no `[ARG]`. Argument and flag names must be valid environment variable names.
 - Any number of code blocks per command, each with no language or `bash`. Any other language is an error, so that a `json` example is never run as a script.
 - A fence may be indented up to three spaces, and that indentation is removed from each line of the script, as Markdown does. Anything indented four or more spaces (or a tab) is literal text: it is never a script, heading, or marker, and it lands in the verbose help.
 - An HTML comment that starts a line (`<!--`) hides everything through the line containing `-->`, so a commented-out code block or heading is ignored. A comment that is never closed is an error.

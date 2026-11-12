@@ -1,7 +1,7 @@
 //! Renders the description of a command, shown for `--help` and for a
 //! command that has no script to run.
 
-use crate::command::{Builtin, Command, Flag, FlagType, Param};
+use crate::command::{Builtin, Command, Flag, FlagType};
 
 /// Describes `command`: its help text, usage line, subcommands, and flags.
 /// `path` holds the command names leading to it from the root.
@@ -25,12 +25,7 @@ pub fn render(path: &[&str], command: &Command, verbose: bool) -> String {
     // the command and naming one of its subcommands are separate forms.
     let mut forms = Vec::new();
     if !command.scripts.is_empty() || command.subcommands.is_empty() {
-        let mut form = prefix.clone();
-        for param in &command.params {
-            form.push(' ');
-            form.push_str(&param_label(param));
-        }
-        forms.push(form);
+        forms.push(with_signature(&prefix, command));
     }
     if !command.subcommands.is_empty() {
         forms.push(format!("{prefix} <command>"));
@@ -82,13 +77,8 @@ fn table(out: &mut String, rows: &[Row], verbose: bool) {
 }
 
 fn command_row(command: &Command) -> Row<'_> {
-    let mut label = command.name.clone();
-    for param in &command.params {
-        label.push(' ');
-        label.push_str(&param_label(param));
-    }
     Row {
-        label,
+        label: with_signature(&command.name, command),
         text: command.short_help.clone().unwrap_or_default(),
         detail: command.long_help.as_deref(),
     }
@@ -134,11 +124,11 @@ fn flag_label(short: Option<char>, long: Option<&str>) -> String {
     }
 }
 
-fn param_label(param: &Param) -> String {
-    if param.required {
-        format!("({})", param.name)
-    } else {
-        format!("[{}]", param.name)
+/// `name` followed by the command's arguments as its heading writes them.
+fn with_signature(name: &str, command: &Command) -> String {
+    match command.signature() {
+        signature if signature.is_empty() => name.to_string(),
+        signature => format!("{name} {signature}"),
     }
 }
 
@@ -220,6 +210,15 @@ Flags:
         assert!(listing.contains("Usage: yio group <command> [flags]\n\n"));
         let listing = render(&["group", "leaf"], &group.subcommands[0], false);
         assert!(listing.contains("Usage: yio group leaf (Y) [flags]\n\n"));
+    }
+
+    #[test]
+    fn shows_the_argument_that_takes_the_rest() {
+        let root = markdown::parse("## search (WHERE) [...TERMS]\n```\necho\n```\n## all [...X]\n").unwrap();
+        let listing = render(&[], &root, false);
+        assert!(listing.contains("  search (WHERE) [...TERMS]\n  all [...X]\n"));
+        let listing = render(&["search"], &root.subcommands[0], false);
+        assert!(listing.contains("Usage: yio search (WHERE) [...TERMS] [flags]\n\n"));
     }
 
     #[test]
