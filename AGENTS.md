@@ -30,6 +30,9 @@ A Rust crate (edition 2024) with no dependencies. The CLI scaffold exists: it lo
 | `docs/cli-parsing.md` | The parsing and running rules the above implement |
 | `docs/embedding.md` | How one `yio.md` embeds another |
 | `docs/scripting-language.md` | The scripting language, cache, and plugins: syntax, built-ins, what is recorded, measurements, decisions |
+| `README.md` | The introduction for users |
+| `.github/workflows/ci.yml` | Builds, tests, and lints on Linux, macOS, and Windows for pushes and pull requests |
+| `.github/workflows/release.yml` | On a `v*` tag, creates a GitHub release and attaches a binary archive per platform |
 
 ## Repo rules
 
@@ -45,6 +48,18 @@ cargo build
 cargo test
 cargo run -- <args>
 ```
+
+CI fails on any clippy warning, so run this before pushing:
+
+```bash
+cargo clippy --all-targets -- -D warnings
+```
+
+The source is not formatted with `rustfmt` and CI does not check it. Do not reformat files you are not otherwise changing.
+
+## Releasing
+
+Set the new version in `Cargo.toml`, commit, then tag that commit `v` plus the version (`v0.1.0`) and push the tag. The release workflow refuses a tag that does not match `Cargo.toml`, runs the tests on each platform, and attaches `yio-<tag>-<target>.tar.gz` (`.zip` on Windows) with a `.sha256` beside each.
 
 ## The `yio.md` format
 
