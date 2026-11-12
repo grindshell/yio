@@ -8,7 +8,16 @@ The file format is heavily inspired by [`mask`](https://github.com/jacobdeichert
 
 ## Status
 
-Scaffold only: a `cargo init` crate (Rust, edition 2024) with no dependencies. Everything below is the intended design, not implemented behavior. Check `docs/` and the code before assuming a feature exists.
+A Rust crate (edition 2024) with no dependencies. The CLI scaffold exists: it loads `yio.md`, resolves commands, arguments, and flags, lists commands, and runs scripts with bash. Embedding, the cache, `.yio/` plugins, the scripting language, and `.yiorc` are design only. Check `docs/` and the code before assuming a feature exists.
+
+| File | Role |
+| --- | --- |
+| `src/command.rs` | The command tree and the built-in flags |
+| `src/markdown.rs` | `yio.md` to command tree |
+| `src/cli.rs` | Command-line arguments to a resolved command and its values |
+| `src/help.rs` | Command listings |
+| `src/run.rs` | Runs a script with bash |
+| `docs/cli-parsing.md` | The parsing rules the above implement |
 
 ## Repo rules
 
@@ -30,7 +39,7 @@ cargo run -- <args>
 - **H2** headings are commands. **H3 and deeper** are subcommands, each nesting under the nearest shallower heading.
 - **Blockquote** (`>`) under a heading: short help text.
 - **Paragraphs** under a heading: verbose help text, shown with `--verbose` / `-V`.
-- **Fenced code block**: the script to run. Always executed with `bash`; the `bash` info string is optional and only an editor hint. A future `.yiorc` may allow other default shells or runners.
+- **Fenced code block**: the script to run. Always executed with `bash`; the `bash` info string is optional and only an editor hint. A future `.yiorc` may allow other default shells or runners. A heading may have several code blocks: they run in order, each in a separate, reinitialized environment.
 - **Positional arguments**: `(MY_ARGUMENT_NAME)` in the heading. Required.
 - **Optional arguments**: `[MY_ARGUMENT_NAME]` in the heading. The script decides whether the variable holds a value.
 - **Named flags**: a paragraph containing `**FLAGS**`, immediately followed (newline optional) by a `-` delimited list. Each top-level item is one flag. Sub-items configure it with the keys `flags`, `type`, `default`, and `description`. Only `flags` is mandatory, the type defaults to string, and flags may have default values (unlike `mask`).
@@ -77,6 +86,7 @@ Present on every command; a `yio.md` may override them.
 
 | Variable | Flags | Type |
 | --- | --- | --- |
+| `YIO_HELP` | `-h --help` | boolean |
 | `YIO_VERBOSE` | `-V --verbose` | boolean |
 | `YIO_VERSION` | `-v --version` | string (semver) |
 | `YIO_CACHE` | `--cache` | boolean |
@@ -89,6 +99,7 @@ Present on every command; a `yio.md` may override them.
 ## CLI behavior
 
 - `yio` with no arguments, in a directory containing `yio.md`: parse the file and write the top-level commands and options to stdout. (This differs from `mask`.)
+- `yio --help` / `-h`: show a formatted description of the given command or subcommand instead of running it. With no command, and with no `yio.md`, it describes the CLI itself.
 - `yio --cache`: write the interpreted result to `.yio/cache.yio`, a cached AST of the commands, subcommands, and options.
 - `yio --remove-cache`: remove that cache.
 
