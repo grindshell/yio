@@ -139,7 +139,7 @@ The `yio.md` declares the command so that it is listed, has help, and accepts th
   (col-def "Size" (map hits file-size)))
 ```
 
-The code block is needed: a command without one only prints its help. It does cost one start of bash on every use of the command, tens of milliseconds, and more through WSL. Where that matters, show the output on the bare `yio` listing instead, which starts no bash.
+The code block is needed: a command without one only prints its help. Keep it to comments. `yio` does not start bash for a block with nothing but comments and blank lines, so the command costs no more than the plugin does.
 
 ## A bash plugin
 

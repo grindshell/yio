@@ -114,4 +114,4 @@ It starts by looking at what it was told, and does nothing unless the first word
 
 Because `args` and `read-file` record what they looked at, a cached table is reused only for the same search and the same `scripting-api.md`.
 
-The `search` command itself has a code block with nothing in it but a comment. A command needs one to be runnable, and the plugin has already done the work by the time it runs.
+The `search` command itself has a code block with nothing in it but a comment. A command needs one to be runnable, and the plugin has already done the work by the time it runs. Bash is not started for a block that holds only comments, so the command costs no more than the plugin does.

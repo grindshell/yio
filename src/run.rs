@@ -33,6 +33,9 @@ pub fn run(
 ) -> Result<ExitCode, String> {
     let array = list.map(|(name, values)| array(name, values));
     for script in scripts {
+        if is_idle(script) {
+            continue;
+        }
         // The assignment goes on the script's first line, so that the line
         // numbers in bash's error messages still match the code block.
         let script = match &array {
@@ -45,6 +48,21 @@ pub fn run(
         }
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// Whether a script gives bash nothing to do: every line is blank or a
+/// comment. Bash would start, do nothing, and exit with zero, so it is not
+/// started.
+///
+/// This is the code block of a command that a plugin answers. The command
+/// needs a block to be runnable, the plugin has already shown the result,
+/// and starting bash would be most of what the command costs.
+fn is_idle(script: &str) -> bool {
+    // Bash takes only spaces and tabs as blanks before a `#`.
+    script.lines().all(|line| {
+        let line = line.trim_start_matches([' ', '\t']);
+        line.is_empty() || line.starts_with('#')
+    })
 }
 
 /// The bash statement that makes `name` an array holding `values`.
@@ -243,7 +261,22 @@ mod wsl {
 
 #[cfg(test)]
 mod tests {
-    use super::{array, quote};
+    use std::process::ExitCode;
+
+    use super::{array, is_idle, quote, run};
+
+    #[test]
+    fn a_script_of_only_comments_gives_bash_nothing_to_do() {
+        for idle in ["", "\n\n", "# Answered by a plugin.", "  # one\n\t# two\n\n#!/bin/sh"] {
+            assert!(is_idle(idle), "{idle:?}");
+        }
+        for busy in ["true", "# note\necho hi", "echo hi # note", ": # no-op", "\u{a0}# not a blank to bash"] {
+            assert!(!is_idle(busy), "{busy:?}");
+        }
+        // Nothing is started for one, so this passes where there is no bash.
+        let idle = ["# Answered by a plugin.\n".to_string()];
+        assert_eq!(run(&idle, &[], None, None), Ok(ExitCode::SUCCESS));
+    }
 
     #[test]
     fn quotes_text_as_one_shell_word() {

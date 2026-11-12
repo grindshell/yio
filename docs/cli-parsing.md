@@ -88,6 +88,8 @@ Scripts run in the directory of the `yio.md` that defines them, which matters fo
 
 Each code block of a command runs as its own `bash -c` process, in the order written. They share the injected variables and nothing else: shell variables, options, and the working directory set by one block do not reach the next. The first block that exits non-zero stops the run, and its exit code becomes `yio`'s.
 
+Bash is not started for a code block that gives it nothing to do: one whose every line is blank or a comment. That is the block of a command a plugin answers (see "An example" in [plugins.md](plugins.md)), and starting bash would be most of what such a command costs.
+
 ## Flag spellings
 
 | Form | Example |
