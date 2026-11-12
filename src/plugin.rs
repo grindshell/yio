@@ -1,6 +1,5 @@
 //! Plugins: scripts in `.yio/pre/` and `.yio/post/` that run around the
-//! loading of the `yio.md` beside them. See "Plugins" in
-//! `docs/scripting-language.md`.
+//! loading of the `yio.md` beside them. See `docs/plugins.md`.
 
 use std::cell::RefCell;
 use std::fs;

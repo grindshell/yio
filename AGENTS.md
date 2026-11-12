@@ -8,10 +8,11 @@ The file format is heavily inspired by [`mask`](https://github.com/jacobdeichert
 
 ## Status
 
-A Rust crate (edition 2024) with no dependencies. The CLI scaffold exists: it loads `yio.md` and the files it embeds, resolves commands, arguments, and flags, lists commands, runs scripts with bash, runs `.yio/` plugins written in bash or the scripting language, and caches both the command tree and the results of scripting-language plugins. `.yiorc` is design only. Check `docs/` and the code before assuming a feature exists.
+A Rust crate (edition 2024) with no dependencies. It loads `yio.md` and the files it embeds, resolves commands, arguments, and flags, lists commands, runs scripts with bash, runs `.yio/` plugins written in bash or the scripting language, and caches both the command tree and the results of scripting-language plugins. `.yiorc` is not designed yet. Check `docs/` and the code before assuming a feature exists.
 
 | File | Role |
 | --- | --- |
+| `src/main.rs` | Ties the rest together: plugins, cache, parsing, then listing or running |
 | `src/command.rs` | The command tree and the built-in flags |
 | `src/markdown.rs` | `yio.md` to command tree, including embeds |
 | `src/cli.rs` | Command-line arguments to a resolved command and its values |
@@ -21,6 +22,7 @@ A Rust crate (edition 2024) with no dependencies. The CLI scaffold exists: it lo
 | `src/bytes.rs` | The byte-level encoding used inside the cache file |
 | `src/input.rs` | What a cached result depended on, and whether it still holds |
 | `src/plugin.rs` | `.yio/pre/` and `.yio/post/` plugins: discovery, order, running |
+| `src/script/mod.rs` | `script::run`, the one way to run a script |
 | `src/script/reader.rs` | `.yio` source bytes to forms |
 | `src/script/eval.rs` | Evaluates forms: keywords, scopes, functions |
 | `src/script/value.rs` | Script values |
@@ -29,7 +31,11 @@ A Rust crate (edition 2024) with no dependencies. The CLI scaffold exists: it lo
 | `src/script/encode.rs` | A script's value as bytes, for the cache |
 | `docs/cli-parsing.md` | The parsing and running rules the above implement |
 | `docs/embedding.md` | How one `yio.md` embeds another |
-| `docs/scripting-language.md` | The scripting language, cache, and plugins: syntax, built-ins, what is recorded, measurements, decisions |
+| `docs/scripting-api.md` | The reference for writing `.yio` scripts: syntax, keywords, every built-in |
+| `docs/scripting-language.md` | Why the language is the way it is, how it is implemented, decisions |
+| `docs/plugins.md` | Which files are plugins, when they run, what they are told |
+| `docs/cache.md` | What is cached, how staleness is detected, the file format, measurements |
+| `docs/yio.md`, `docs/.yio/pre/0000_api.yio` | A working example: a plugin that draws `docs/scripting-api.md` as a filterable table |
 | `README.md` | The introduction for users |
 | `.github/workflows/ci.yml` | Builds, tests, and lints on Linux, macOS, and Windows for pushes and pull requests |
 | `.github/workflows/release.yml` | On a `v*` tag, creates a GitHub release and attaches a binary archive per platform |
@@ -37,7 +43,8 @@ A Rust crate (edition 2024) with no dependencies. The CLI scaffold exists: it lo
 ## Repo rules
 
 - **Keep the dependency tree as lean as possible.** Prefer `std` and a small amount of hand-written code over a crate. Adding any dependency (including dev/build deps and enabling non-default features) needs a stated justification and the user's sign-off. This applies to the Markdown parser, argument parser, and serialization for the cache.
-- **`docs/` holds design, implementation, and update docs.** Design decisions go there before or alongside the code that implements them. When behavior changes, update the relevant doc in the same change.
+- **`docs/` holds design, implementation, and update docs.** Design decisions go there before or alongside the code that implements them. When behavior changes, update the relevant doc in the same change. Each doc has one subject; link to another doc instead of repeating it.
+- **Every keyword and built-in has a row in `docs/scripting-api.md`**, in a table row that starts with the call. A test fails when the document and the code disagree, and the example plugin reads those rows.
 - Licensing is MIT OR Apache-2.0 (`LICENSE-MIT`, `LICENSE-APACHE`); new files and any vendored code must be compatible.
 - Do not guess on the items under [Open questions](#open-questions); ask.
 
@@ -135,7 +142,7 @@ Present on every command; a `yio.md` may override them.
 
 `cache.yio` shares the scripting language's format where possible: the file is a single `(cache <raw bytes>)` expression whose bytes are the compressed AST. Scripts may be able to generate and pass around that compressed AST explicitly.
 
-The byte encoding is a custom format optimized for interpretation speed, not for size or readability.
+The byte encoding is a custom format optimized for interpretation speed, not for size or readability. `docs/cache.md` has the layout and the rules for when a result is out of date.
 
 ## The `.yio/` directory
 
@@ -152,7 +159,7 @@ Local to the current working directory, next to the `yio.md` it belongs to.
 - Plugin file names are `NUMBER_NAME.EXT`. `NUMBER` is parsed as a `u64` (so `0000_build_view` is 0) and `NAME` is used for logging.
 - The extension picks the runner: `.bash` for bash scripts, `.yio` for the yio scripting language (below).
 - Plugins run at cache time by default. A plugin that should not must opt out itself by checking `YIO_CACHE`.
-- `pre/` plugins run before the `yio.md` is read; `post/` plugins run once the command tree is ready, before anything is listed or run. An embedded directory's plugins run too. See "Plugins" in `docs/scripting-language.md`.
+- `pre/` plugins run before the `yio.md` is read; `post/` plugins run once the command tree is ready, before anything is listed or run. An embedded directory's plugins run too. See `docs/plugins.md`.
 
 ## Scripting language
 
@@ -165,7 +172,7 @@ Two design constraints drive every decision about the language and its built-ins
 
 The second constraint has a hard rule for anyone adding a built-in: it may look at or change the outside world only through `src/input.rs`, and must record what it saw or left behind with `Interp::record`. A built-in whose result cannot be replayed from recorded inputs (the clock, randomness, the network, running a program) does not belong in the language.
 
-The language is implemented. `docs/scripting-language.md` is the reference. The design sketch it grew from:
+The language is implemented. `docs/scripting-api.md` is the reference and `docs/scripting-language.md` explains the design. The sketch it grew from:
 
 ```lisp
 -- comments start with two dashes
@@ -202,4 +209,4 @@ Not yet decided. Ask rather than assume.
 
 - Scope and format of `.yiorc`.
 
-The scripting language's design questions are settled; "Decisions made" in `docs/scripting-language.md` lists them.
+The scripting language's design questions are settled; "Decisions" in `docs/scripting-language.md` lists them.

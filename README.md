@@ -102,7 +102,7 @@ The full rules are in [docs/cli-parsing.md](docs/cli-parsing.md), and embedding 
 
 Scripts in `.yio/pre/` run before the `yio.md` beside them is read, and scripts in `.yio/post/` after it has been loaded. They are named `NUMBER_NAME.bash` or `NUMBER_NAME.yio` and run in order of the number.
 
-A `.bash` plugin is an ordinary bash script. A `.yio` plugin is written in a small Lisp-like language made for reading files and showing what it found. This one, at `docs/.yio/pre/0000_build_view.yio`, prints a table of the files in `docs/lore/` every time `yio` is used in `docs/`:
+A `.bash` plugin is an ordinary bash script. A `.yio` plugin is written in a small Lisp-like language made for reading files and showing what it found. [docs/scripting-api.md](docs/scripting-api.md) is its reference. This one, at `docs/.yio/pre/0000_build_view.yio`, prints a table of the files in `docs/lore/` every time `yio` is used in `docs/`:
 
 ```lisp
 (var lore-files (list-dir "lore"))
@@ -131,6 +131,23 @@ lore/a.md  19         draft
 lore/b.md  15
 ```
 
+This repository has a working one. Run `yio` in [docs/](docs/yio.md) and a plugin draws the scripting API as a table, read out of the reference itself. Set `API` to filter it:
+
+```
+API=dir yio
+```
+
+```
+5 of 53 calls mention "dir"
+Call               Group           Gives
+-----------------  --------------  ---------------------------------------------------------------
+(list-dir [path])  Reading files   The entries of a directory, sorted by name
+(is-dir path)      Reading files   Whether the path is a directory
+(make-dir path)    Changing files  Makes a directory, and any missing above it, and gives the path
+(move from to)     Changing files  Moves a file or directory and gives the new path
+(remove path)      Changing files  Removes a file or an empty directory and gives ()
+```
+
 ## The cache
 
 ```bash
@@ -148,7 +165,7 @@ With the table plugin above over 1000 files, a run takes 138 ms without the cach
 
 The cache describes one machine's files, so add `.yio/cache.yio` to your `.gitignore`.
 
-The language, its built-ins, and how the cache decides what is out of date are in [docs/scripting-language.md](docs/scripting-language.md).
+How the cache decides what is out of date is in [docs/cache.md](docs/cache.md), and when plugins run in [docs/plugins.md](docs/plugins.md).
 
 ## Development
 

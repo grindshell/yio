@@ -627,8 +627,10 @@ fn col(_: &mut Interp, args: &[Value], pos: Pos) -> Result<Value, Error> {
 mod tests {
     use std::path::Path;
 
+    use super::BUILTINS;
     use crate::input::{self, Freshness, Input};
     use crate::script;
+    use crate::script::eval::KEYWORDS;
     use crate::testing::{SECOND, Scratch};
 
     /// What a script produced, with its value printed.
@@ -962,6 +964,57 @@ mod tests {
         assert_eq!(
             failure(r#"(write-file "x" 5)"#),
             "1:1: `write-file` needs a string or bytes, but was given an integer"
+        );
+    }
+
+    /// `docs/scripting-api.md` is the reference, and the table `yio` draws
+    /// in `docs/` is read out of it, so it has to list exactly what exists:
+    /// one table row per keyword and built-in, starting with the call.
+    #[test]
+    fn the_api_doc_lists_every_keyword_and_built_in() {
+        let doc = include_str!("../../docs/scripting-api.md");
+        let mut documented: Vec<&str> = doc
+            .lines()
+            .filter_map(|line| line.strip_prefix("| `("))
+            .map(|call| call.split([' ', ')']).next().unwrap_or_default())
+            .collect();
+        let mut actual: Vec<&str> = KEYWORDS
+            .iter()
+            .copied()
+            .chain(BUILTINS.iter().map(|builtin| builtin.name))
+            .collect();
+        documented.sort_unstable();
+        actual.sort_unstable();
+        assert_eq!(documented, actual);
+    }
+
+    /// The plugin that draws that table is the project's own demonstration,
+    /// so it should keep working as the language changes.
+    #[test]
+    fn the_api_table_plugin_runs() {
+        let docs = Path::new(env!("CARGO_MANIFEST_DIR")).join("docs");
+        let source = include_bytes!("../../docs/.yio/pre/0000_api.yio");
+        let table = |filter: &str| {
+            script::run(source, &docs, &[("API", filter.to_string())], |outcome| {
+                outcome.value.to_string()
+            })
+            .unwrap_or_else(|error| panic!("the plugin failed: {error}"))
+        };
+        let total = KEYWORDS.len() + BUILTINS.len();
+
+        assert_eq!(
+            table("make-dir"),
+            format!(
+                "(\"1 of {total} calls mention \\\"make-dir\\\"\" (col \
+                 (col-def \"Call\" (\"(make-dir path)\")) \
+                 (col-def \"Group\" (\"Changing files\")) \
+                 (col-def \"Gives\" (\"Makes a directory, and any missing above it, and gives the path\"))))"
+            )
+        );
+        assert!(table("").starts_with(&format!("(\"{total} of {total} calls mention")));
+        assert_eq!(
+            table("no such call"),
+            format!("\"None of the {total} calls mention \\\"no such call\\\"\"")
         );
     }
 

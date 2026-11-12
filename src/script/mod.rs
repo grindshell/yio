@@ -1,4 +1,5 @@
-//! The `.yio` scripting language. See `docs/scripting-language.md`.
+//! The `.yio` scripting language. `docs/scripting-api.md` is the reference
+//! and `docs/scripting-language.md` the design.
 
 pub mod builtins;
 pub mod encode;

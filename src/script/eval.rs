@@ -1,6 +1,6 @@
 //! Evaluates forms.
 //!
-//! The language is described in `docs/scripting-language.md`. In short: a
+//! The language is described in `docs/scripting-api.md`. In short: a
 //! list is a call unless its first element is one of the keywords below, and
 //! everything is an expression.
 
@@ -14,7 +14,7 @@ use super::reader::{Error, Form, FormKind, Pos};
 use super::value::{Function, Value};
 
 /// Words with a fixed meaning. They cannot name a variable.
-const KEYWORDS: [&str; 8] = ["var", "set", "if", "do", "fn", "return", "and", "or"];
+pub(super) const KEYWORDS: [&str; 8] = ["var", "set", "if", "do", "fn", "return", "and", "or"];
 
 /// How many lists may be in the middle of being evaluated at once: each
 /// nested expression and each function call counts. Evaluation recurses on

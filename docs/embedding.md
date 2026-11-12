@@ -50,7 +50,7 @@ yio: docs/yio.md: line 12: flag `JOBS` is missing its `flags` option
 
 ## Plugins and the cache
 
-An embedded directory's `.yio/pre/` and `.yio/post/` plugins run when its `yio.md` is embedded, in that directory. The cache of the directory `yio` was started in covers the embedded files and those plugins; the embedded directory's own `.yio/cache.yio` is only used when `yio` is run from there. See `scripting-language.md`.
+An embedded directory's `.yio/pre/` and `.yio/post/` plugins run when its `yio.md` is embedded, in that directory. The cache of the directory `yio` was started in covers the embedded files and those plugins; the embedded directory's own `.yio/cache.yio` is only used when `yio` is run from there. See [plugins.md](plugins.md) and [cache.md](cache.md).
 
 ## Not implemented
 

@@ -1,6 +1,6 @@
 //! The `.yio/cache.yio` file: what it holds and how it is encoded. Whether
 //! its contents are still current is decided by `input.rs`. See
-//! `docs/scripting-language.md`.
+//! `docs/cache.md`.
 //!
 //! The file is one `.yio` form, `(cache #<length>:<payload>)`. The payload
 //! uses the encoding of `bytes.rs`:

@@ -3,7 +3,7 @@
 //! Anything that looks at the outside world on behalf of a cached result
 //! does it through this module, which hands back both what it saw and an
 //! [`Input`] describing it. Checking the inputs later says whether the
-//! result can be reused. See "Dirtiness" in `docs/scripting-language.md`.
+//! result can be reused. See "Dirtiness" in `docs/cache.md`.
 
 use std::cell::RefCell;
 use std::fs;

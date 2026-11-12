@@ -1,0 +1,45 @@
+-- Draws the scripting API as one table, read out of scripting-api.md so
+-- that the table and the document cannot drift apart.
+--
+--   yio             every keyword and built-in
+--   API=file yio    only the rows that mention "file"
+
+-- Unset is (), which is false, so everything is kept.
+(var wanted (env "API"))
+
+-- A row of the document's tables that describes a call starts like this.
+(var marker "| `(")
+
+-- The heading a row sits under names its group.
+(var group "")
+(var total 0)
+(var rows ())
+
+-- One cell of a Markdown table row, without its code marks.
+(fn cell (row index)
+  (trim (replace (nth (split row "|") index) "`" "")))
+
+(map (lines (read-file "scripting-api.md"))
+  (fn (line)
+    (if (or (starts-with line "## ") (starts-with line "### "))
+      (set group (trim (replace line "#" ""))))
+    (if (starts-with line marker)
+      (do
+        (set total (+ total 1))
+        (var row (list (cell line 1) group (cell line 2)))
+        (if (or (not wanted) (contains (join row " ") wanted))
+          (set rows (append rows row)))))))
+
+(if (is-empty rows)
+  (return (str "None of the " total " calls mention \"" wanted "\"")))
+
+(fn column (header index)
+  (col-def header (map rows (fn (row) (nth row index)))))
+
+(list
+  (if wanted
+    (str (len rows) " of " total " calls mention \"" wanted "\""))
+  (col
+    (column "Call" 0)
+    (column "Group" 1)
+    (column "Gives" 2)))
