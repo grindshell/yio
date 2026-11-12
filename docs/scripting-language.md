@@ -2,7 +2,7 @@
 
 A plan. It covers the `.yio` scripting language, the `.yio/cache.yio` file, and `.yio/pre/` and `.yio/post/` plugins, because the three share one file format and one notion of "dirty".
 
-**Status**: phases 1 to 3 are implemented. The reader is described under "Syntax", the evaluator under "Semantics", and the cache file, its dirtiness check, and its lifecycle under "The cache", which holds the command tree only. Built-ins that read files, plugins, and script result caching do not exist yet, so `yio` itself does not run scripts: outside tests, nothing calls the reader or the evaluator until phase 5.
+**Status**: phases 1 to 4 are implemented. The reader is described under "Syntax", the evaluator under "Semantics", the built-ins and what they record under "Built-ins and tracking", and the cache file, its dirtiness check, and its lifecycle under "The cache", which holds the command tree only. Plugins and script result caching do not exist yet, so `yio` itself does not run scripts: outside tests, nothing calls the reader or the evaluator until phase 5.
 
 Statements marked **Given** come from the project's design. Everything else is a proposal. The decisions that need an answer before the affected phase starts are collected at the end.
 
@@ -40,7 +40,17 @@ Only the command tree unit exists so far.
 
 ### Dirtiness
 
-An input is one of: a file's contents, a directory's listing, the absence of a path, or an environment variable's value. Only file inputs exist so far. Each stores a fingerprint of three things: size, modification time in nanoseconds, and a 64-bit hash of the contents (for a directory, it will be a hash of the sorted entry names).
+An input is one thing a result depended on, recorded narrowly so that only a change that could alter the result counts. Implemented in `src/input.rs`.
+
+| Input | Recorded | Changed when |
+| --- | --- | --- |
+| A file's contents | Size, modification time, content hash | The content differs |
+| A directory's listing | Modification time, hash of the sorted names | A name is added, removed, or renamed. Editing a file inside does not count. |
+| What a path is | File, directory, something else, or missing | It appears, disappears, or changes type |
+| A file's size | The size | The size differs. Content of the same size does not count. |
+| An environment variable | Hash of the value, or that it was unset | The value differs |
+
+The last three are settled by one `stat` or one environment lookup. Files and listings follow the steps below, which are written for a file; a listing is the same with the directory re-listed instead of the file re-read.
 
 The cache also stores an **as-of time**, taken at the start of the run that recorded the inputs, before any of them was read.
 
@@ -164,9 +174,20 @@ Implemented in `src/script/eval.rs`. A list is a call unless its first element i
 - **No** macros, `eval`, imports, or loop forms. Iteration is `map`, `filter`, and recursion.
 - **Errors** stop the script and report `line:column: message`, pointing at the call that failed.
 
-Evaluation nests at most 200 deep, counting each nested expression and each function call, so runaway recursion is an error rather than a crash. The limit is sized for the smallest stack `yio` runs on, the 1 MiB main thread on Windows: one level costs up to about 650 bytes in a release build and 3.6 KiB in a debug build. That allows roughly 60 to 200 recursive calls depending on how much each one nests, which is enough for walking directories but not for recursing over a long list; `map` and `filter` are for that. Raising it means running scripts on a thread with a larger stack, which is easiest to do when plugins are wired in (phase 5).
+Evaluation nests at most 2000 deep, counting each nested expression and each function call, so runaway recursion is an error rather than a crash. That allows several hundred recursive calls, enough to recurse over a list of 500 items.
 
-The pure built-ins exist already: `+ - * / %`, `= < > <= >=`, `not`, `list`, and `is-empty`. `=` compares any two values structurally, and values of different kinds are simply unequal. The ordering operators take two integers or two strings.
+Evaluation recurses on the native stack, and the main thread's (1 MiB on Windows) is too small for a useful limit, so every script runs on its own thread with a 64 MiB stack, of which only the used part is committed. Measured cost of one level:
+
+| Path | Release | Debug |
+| --- | --- | --- |
+| A function calling itself | 0.65 KiB | 3.6 KiB |
+| A function calling itself through `map` | 1.4 KiB | 5.7 KiB |
+
+At the limit that is at most 2.7 MiB in a release build and 11.2 MiB in a debug build. A test drives each path to the limit, so frames growing past the stack shows up as a failing test run, not as a crash in use.
+
+A script's values cannot leave that thread. `script::run` therefore takes a function that receives the outcome on the script's thread and reduces it to something plain, such as rendered text or encoded bytes.
+
+Not guarded: a value nested hundreds of thousands deep, built without recursion by wrapping a variable in a new list on every pass of a `map`. Freeing it recurses once per level.
 
 ### A script is a value
 
@@ -178,22 +199,73 @@ Reading of the sketch: `col` takes column definitions and produces the table, an
 
 ### Values
 
-`()`, booleans, integers, strings, bytes, lists, functions, and view nodes (table, column). All except functions have a binary encoding of one tag byte plus payload, the same encoding the cache uses. A script whose result contains a function is an error.
+`()`, booleans, integers, strings, bytes, lists, functions, columns, and tables. All except functions will have a binary encoding of one tag byte plus payload, the same encoding the cache uses (phase 6). A script whose result contains a function is an error.
+
+Lists and strings are never changed in place. `append` and the like give a new value, so a value handed to a function cannot be altered behind the caller's back.
 
 ### Built-ins and tracking
 
 Every built-in that looks at the outside world records what it looked at. That record is the unit's input list. A script is then a pure function of its recorded inputs, which is the property that makes replay correct.
 
-| Group | First set | Recorded input |
-| --- | --- | --- |
-| Reading files | `list-dir`, `read-file`, `file-size`, `is-file`, `is-dir` | The file, the directory listing, or the path's absence |
-| Environment | `env` | The variable's value |
-| Paths | `path-join`, `base-name`, `extension` | None |
-| Text | `split`, `join`, `lines`, `trim`, `starts-with`, `ends-with`, `contains`, `replace`, `len`, `str` | None |
-| Lists | `list`, `map`, `filter`, `is-empty`, `len`, `first`, `rest`, `nth`, `append` | None |
-| UI | `col`, `col-def` | None |
+Implemented in `src/script/builtins.rs`. Running a script gives its value together with the list of inputs these recorded.
 
-Relative paths resolve against the directory that holds the `.yio/` directory, matching where that directory's scripts run.
+**The outside world.** Each call records one input.
+
+| Call | Gives | Records |
+| --- | --- | --- |
+| `(list-dir)`, `(list-dir path)` | The entries, sorted by name. Each is spelled ready to pass on: `(list-dir "lore")` gives `"lore/a.md"`. With no argument, bare names from the script's own directory. | The listing |
+| `(read-file path)` | The contents, which must be UTF-8 | The contents |
+| `(file-size path)` | The size in bytes | The size |
+| `(is-file path)`, `(is-dir path)` | A boolean. A missing path is neither. | What the path is |
+| `(env name)` | The value, or `()` if unset | The value |
+
+A missing file or directory is an error for `list-dir`, `read-file`, and `file-size`. Relative paths resolve against the script's base directory, which will be the one holding its `.yio/` directory. Scripts may read anywhere, including absolute paths and `..`.
+
+**Paths**, as text only: nothing is looked up.
+
+| Call | Gives |
+| --- | --- |
+| `(path-join part...)` | The parts joined with `/`. A part starting with `/` replaces what came before; empty parts are skipped. |
+| `(base-name path)` | The last component: `a.md` for `lore/a.md` |
+| `(extension path)` | What follows the last dot of the base name, without the dot. Empty for `Makefile` and `.gitignore`. |
+
+**Text**
+
+| Call | Gives |
+| --- | --- |
+| `(split text separator)` | A list of the pieces |
+| `(join list separator)` | The strings of a list, joined |
+| `(lines text)` | The lines, without their line endings |
+| `(trim text)` | Without whitespace at either end |
+| `(starts-with text prefix)`, `(ends-with text suffix)` | A boolean |
+| `(contains text part)`, `(contains list item)` | A boolean |
+| `(replace text from to)` | With every occurrence replaced |
+| `(str value...)` | The values as text, run together. Strings as they are, `()` as nothing, anything else as a script would write it. |
+
+**Lists**
+
+| Call | Gives |
+| --- | --- |
+| `(list item...)` | A list |
+| `(is-empty value)` | Whether a list or string has nothing in it |
+| `(len value)` | Items in a list, characters in a string, or bytes |
+| `(first list)` | The first item, or `()` for an empty list |
+| `(rest list)` | Everything after the first item |
+| `(nth list index)` | The item at an index, from zero. Out of range is an error. |
+| `(append list item...)` | A new list with the items added |
+| `(map list function)` | The results of calling the function on each item |
+| `(filter list function)` | The items for which the function gives a true value |
+
+`map` and `filter` take the list first, as in the design sketch, and work only on lists. The function can be a script's own or a built-in: `(map files file-size)`.
+
+**Tables**
+
+| Call | Gives |
+| --- | --- |
+| `(col-def header cells)` | A column: a header string and a list of cells |
+| `(col column...)` | A table of those columns, for `yio` to draw |
+
+**Arithmetic and comparison**: `+ - * / %`, `= < > <= >=`, `not`. `=` compares any two values structurally, and values of different kinds are simply unequal. The ordering operators take two integers or two strings.
 
 Deliberately absent: the clock, randomness, the network, and running other programs. Any of them makes a result impossible to replay. If one is ever needed it should mark the unit as never cached.
 
@@ -222,17 +294,17 @@ Each phase ends with tests and its doc updated. Caching starts producing a file 
 | 1 | Reader (done) | Bytes in, forms out, with positions for errors. Comments, strings, integers, symbols, lists, `()`, and the bytes literal. `src/script/reader.rs`. |
 | 2 | Cache file and command tree (done) | Encode and decode the payload, fingerprints, the dirtiness check, `--cache`, `--remove-cache`, loading from a clean cache. `src/cache.rs`. |
 | 3 | Evaluator (done) | Values, scopes, the special forms, functions and closures, errors. No built-ins that touch the outside world. `src/script/eval.rs`. |
-| 4 | Built-ins and tracking | The first set above, with input recording. `src/script/builtins.rs`. |
+| 4 | Built-ins and tracking (done) | The first set above, with input recording. `src/script/builtins.rs`. |
 | 5 | Plugins | Discovery, ordering, the bash and `.yio` runners, rendering values, embedded directories. `src/plugin.rs`. |
 | 6 | Script result caching | Script result units in the cache, replay on clean runs. The docs-table example runs end to end and is skipped when nothing changed. |
 | 7 | Writes and tuning | Write built-ins with output tracking; benchmark with realistic plugin sets before optimizing the encoding further. |
 
 ## Decisions needed
 
-Decided: the bytes literal is `#<length>:<bytes>`; "compressed" means a compact encoding; a dirty cache refreshes itself; `set` reassignment is allowed; a script's output is its final value.
+Decided: the bytes literal is `#<length>:<bytes>`; "compressed" means a compact encoding; a dirty cache refreshes itself; `set` reassignment is allowed; a script's output is its final value; scripts may read files anywhere.
 
 | # | Question | Proposed | Blocks |
 | --- | --- | --- | --- |
 | 6 | With a valid cache, do `.bash` plugins still run on every access? | Yes | Phase 5 |
 | 7 | Does `post/` run after `yio.md` is loaded, or after the chosen command finishes? | After it is loaded | Phase 5 |
-| 8 | May scripts read or write outside the directory tree of their `yio.md`? | Read anywhere, write only inside | Phases 4 and 7 |
+| 8 | May scripts write outside the directory tree of their `yio.md`? | No, write only inside | Phase 7 |

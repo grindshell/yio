@@ -1,5 +1,6 @@
-//! The `.yio/cache.yio` file: what it holds, how it is encoded, and how to
-//! tell whether it is still current. See `docs/scripting-language.md`.
+//! The `.yio/cache.yio` file: what it holds and how it is encoded. Whether
+//! its contents are still current is decided by `input.rs`. See
+//! `docs/scripting-language.md`.
 //!
 //! The file is one `.yio` form, `(cache #<length>:<payload>)`. The payload is
 //! a custom binary encoding: integers are fixed-width little-endian and a
@@ -14,7 +15,7 @@
 //!   u8   kind
 //!   str  source path
 //!   u32  input count
-//!   input: u8 kind, str path, u64 size, u64 mtime ns, u64 content hash
+//!   input: u8 kind, then the fields of that kind (see `put_input`)
 //!   u32  body length
 //!   body
 //! ```
@@ -22,14 +23,13 @@
 //! A unit is one independently cached result together with the inputs it was
 //! computed from. The only kind so far is the command tree.
 
-use std::cell::RefCell;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::cli::VERSION;
 use crate::command::{Command, Flag, FlagType, Param};
+use crate::input::{Input, PathKind};
 use crate::markdown::FILE_NAME;
 
 pub const FILE: &str = ".yio/cache.yio";
@@ -38,128 +38,10 @@ pub const FILE: &str = ".yio/cache.yio";
 const FORMAT: u8 = 1;
 const PREFIX: &[u8] = b"(cache #";
 const TREE_UNIT: u8 = 1;
-const FILE_INPUT: u8 = 1;
-
-/// How far apart two writes must be for their modification times to be sure
-/// to differ, on the coarsest file system worth supporting (FAT, at two
-/// seconds).
-const RESOLUTION_NS: u64 = 2_000_000_000;
 
 /// How deeply commands may nest in a cache file. Real trees stay far below
 /// this; it stops a damaged file from overflowing the stack.
 const MAX_DEPTH: usize = 256;
-
-/// Nanoseconds since the Unix epoch.
-pub fn now() -> u64 {
-    since_epoch(SystemTime::now())
-}
-
-fn since_epoch(time: SystemTime) -> u64 {
-    time.duration_since(UNIX_EPOCH).map_or(0, |elapsed| elapsed.as_nanos() as u64)
-}
-
-fn modified(metadata: &fs::Metadata) -> u64 {
-    metadata.modified().map_or(0, since_epoch)
-}
-
-/// FNV-1a. It only has to notice that a file changed, not resist tampering.
-fn hash(bytes: &[u8]) -> u64 {
-    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
-    for byte in bytes {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-    }
-    hash
-}
-
-/// A file a cached result was computed from, and what it looked like then.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Input {
-    /// Relative to the current directory, with forward slashes.
-    pub path: String,
-    pub size: u64,
-    pub mtime: u64,
-    pub hash: u64,
-}
-
-/// Reads files on behalf of the loader and remembers each one as an input.
-#[derive(Default)]
-pub struct Recorder {
-    inputs: RefCell<Vec<Input>>,
-}
-
-impl Recorder {
-    pub fn read(&self, path: &Path) -> io::Result<String> {
-        // The metadata is taken first. If the file changes between the two
-        // calls, the recorded time is older than the contents, so the next
-        // check falls back to comparing hashes instead of trusting it.
-        let metadata = fs::metadata(path)?;
-        let text = fs::read_to_string(path)?;
-        let input = Input {
-            path: path.to_string_lossy().replace('\\', "/"),
-            size: text.len() as u64,
-            mtime: modified(&metadata),
-            hash: hash(text.as_bytes()),
-        };
-        let mut inputs = self.inputs.borrow_mut();
-        if !inputs.iter().any(|known| known.path == input.path) {
-            inputs.push(input);
-        }
-        Ok(text)
-    }
-
-    pub fn into_inputs(self) -> Vec<Input> {
-        self.inputs.into_inner()
-    }
-}
-
-/// Whether a cached result can still be used.
-#[derive(Debug, PartialEq)]
-pub enum Freshness {
-    /// Every input is unchanged.
-    Clean,
-    /// Every input is unchanged, but some had to be read to be sure. Storing
-    /// these updated inputs with a new as-of time makes the next check cheap.
-    Settled(Vec<Input>),
-    /// At least one input changed.
-    Dirty,
-}
-
-/// Compares `inputs` with the files as they are now. `as_of` is when the
-/// inputs were recorded and `now` is the time of this check.
-pub fn check(inputs: &[Input], as_of: u64, now: u64) -> Freshness {
-    let mut current = Vec::with_capacity(inputs.len());
-    let mut settle = false;
-    for input in inputs {
-        let Ok(metadata) = fs::metadata(&input.path) else {
-            return Freshness::Dirty;
-        };
-        if !metadata.is_file() || metadata.len() != input.size {
-            return Freshness::Dirty;
-        }
-        let mtime = modified(&metadata);
-        // A file modified this close to the recording could have been
-        // changed again afterwards without its time moving on.
-        let racy = mtime.saturating_add(RESOLUTION_NS) >= as_of;
-        if mtime != input.mtime || racy {
-            // The time proves nothing either way, so compare contents. This
-            // also keeps `touch` and same-content rewrites from counting as
-            // changes.
-            match fs::read(&input.path) {
-                Ok(bytes) if hash(&bytes) == input.hash => {}
-                _ => return Freshness::Dirty,
-            }
-            // Re-recording only helps once the file is old enough to trust.
-            settle |= mtime.saturating_add(RESOLUTION_NS) < now;
-        }
-        current.push(Input { mtime, ..input.clone() });
-    }
-    if settle {
-        Freshness::Settled(current)
-    } else {
-        Freshness::Clean
-    }
-}
 
 /// The command tree unit of a cache file.
 pub struct Stored<'a> {
@@ -181,11 +63,7 @@ pub fn serialize(as_of: u64, inputs: &[Input], tree: &[u8]) -> Vec<u8> {
     put_str(&mut payload, FILE_NAME);
     put_len(&mut payload, inputs.len());
     for input in inputs {
-        put_u8(&mut payload, FILE_INPUT);
-        put_str(&mut payload, &input.path);
-        put_u64(&mut payload, input.size);
-        put_u64(&mut payload, input.mtime);
-        put_u64(&mut payload, input.hash);
+        put_input(&mut payload, input);
     }
     put_len(&mut payload, tree.len());
     payload.extend_from_slice(tree);
@@ -232,15 +110,7 @@ pub fn parse(file: &[u8]) -> Result<Stored<'_>, String> {
         let _source = bytes.str()?;
         let mut inputs = Vec::new();
         for _ in 0..bytes.u32()? {
-            if bytes.u8()? != FILE_INPUT {
-                return Err("cache has an unknown kind of input".to_string());
-            }
-            inputs.push(Input {
-                path: bytes.str()?.to_string(),
-                size: bytes.u64()?,
-                mtime: bytes.u64()?,
-                hash: bytes.u64()?,
-            });
+            inputs.push(take_input(&mut bytes)?);
         }
         let length = bytes.u32()? as usize;
         let body = bytes.take(length)?;
@@ -274,6 +144,79 @@ pub fn remove() -> io::Result<bool> {
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
         Err(error) => Err(error),
     }
+}
+
+const FILE_INPUT: u8 = 1;
+const DIR_INPUT: u8 = 2;
+const KIND_INPUT: u8 = 3;
+const SIZE_INPUT: u8 = 4;
+const ENV_INPUT: u8 = 5;
+
+fn put_input(out: &mut Vec<u8>, input: &Input) {
+    match input {
+        Input::File { path, size, mtime, hash } => {
+            put_u8(out, FILE_INPUT);
+            put_str(out, path);
+            put_u64(out, *size);
+            put_u64(out, *mtime);
+            put_u64(out, *hash);
+        }
+        Input::Dir { path, mtime, hash } => {
+            put_u8(out, DIR_INPUT);
+            put_str(out, path);
+            put_u64(out, *mtime);
+            put_u64(out, *hash);
+        }
+        Input::Kind { path, kind } => {
+            put_u8(out, KIND_INPUT);
+            put_str(out, path);
+            put_u8(out, match kind {
+                PathKind::Missing => 0,
+                PathKind::File => 1,
+                PathKind::Dir => 2,
+                PathKind::Other => 3,
+            });
+        }
+        Input::Size { path, size } => {
+            put_u8(out, SIZE_INPUT);
+            put_str(out, path);
+            put_u64(out, *size);
+        }
+        Input::Env { name, hash } => {
+            put_u8(out, ENV_INPUT);
+            put_str(out, name);
+            put_u8(out, u8::from(hash.is_some()));
+            put_u64(out, hash.unwrap_or(0));
+        }
+    }
+}
+
+fn take_input(bytes: &mut Bytes) -> Result<Input, String> {
+    let kind = bytes.u8()?;
+    let path = bytes.str()?.to_string();
+    Ok(match kind {
+        FILE_INPUT => {
+            Input::File { path, size: bytes.u64()?, mtime: bytes.u64()?, hash: bytes.u64()? }
+        }
+        DIR_INPUT => Input::Dir { path, mtime: bytes.u64()?, hash: bytes.u64()? },
+        KIND_INPUT => Input::Kind {
+            path,
+            kind: match bytes.u8()? {
+                0 => PathKind::Missing,
+                1 => PathKind::File,
+                2 => PathKind::Dir,
+                3 => PathKind::Other,
+                _ => return Err("cache has an unknown kind of path".to_string()),
+            },
+        },
+        SIZE_INPUT => Input::Size { path, size: bytes.u64()? },
+        ENV_INPUT => {
+            let set = bytes.u8()? != 0;
+            let hash = bytes.u64()?;
+            Input::Env { name: path, hash: set.then_some(hash) }
+        }
+        _ => return Err("cache has an unknown kind of input".to_string()),
+    })
 }
 
 /// Encodes a command and everything under it, parents before children.
@@ -445,7 +388,6 @@ mod tests {
     use super::*;
     use crate::markdown;
     use crate::script::reader::{self, FormKind};
-    use std::time::Duration;
 
     const SOURCE: &str = "\
 > Project tasks
@@ -485,7 +427,7 @@ echo \"two\"
     }
 
     fn input(path: &str) -> Input {
-        Input { path: path.to_string(), size: 3, mtime: 42, hash: 7 }
+        Input::File { path: path.to_string(), size: 3, mtime: 42, hash: 7 }
     }
 
     #[test]
@@ -503,6 +445,23 @@ echo \"two\"
         assert_eq!(stored.as_of, 1234);
         assert_eq!(stored.inputs, inputs);
         assert_eq!(stored.body, body);
+    }
+
+    #[test]
+    fn every_kind_of_input_survives_a_round_trip() {
+        let inputs = [
+            input("yio.md"),
+            Input::Dir { path: "lore".to_string(), mtime: 9, hash: u64::MAX },
+            Input::Kind { path: "a".to_string(), kind: PathKind::Missing },
+            Input::Kind { path: "b".to_string(), kind: PathKind::File },
+            Input::Kind { path: "c".to_string(), kind: PathKind::Dir },
+            Input::Kind { path: "d".to_string(), kind: PathKind::Other },
+            Input::Size { path: "lore/a.md".to_string(), size: 12 },
+            Input::Env { name: "HOME".to_string(), hash: Some(0) },
+            Input::Env { name: "UNSET".to_string(), hash: None },
+        ];
+        let file = serialize(0, &inputs, &encode_tree(&tree()));
+        assert_eq!(parse(&file).unwrap().inputs, inputs);
     }
 
     #[test]
@@ -551,127 +510,5 @@ echo \"two\"
             parse(&version).err().unwrap(),
             "cache was written by a different yio version"
         );
-    }
-
-    /// A scratch directory that is removed when the test ends.
-    struct Scratch(PathBuf);
-
-    impl Scratch {
-        fn new(name: &str) -> Self {
-            let dir = std::env::temp_dir().join(format!("yio-{}-{name}", std::process::id()));
-            fs::create_dir_all(&dir).unwrap();
-            Scratch(dir)
-        }
-
-        /// Writes a file and sets its modification time. Returns the path
-        /// and the input a recorder would have made for it.
-        fn file(&self, name: &str, text: &str, mtime: u64) -> (String, Input) {
-            let path = self.0.join(name);
-            fs::write(&path, text).unwrap();
-            set_mtime(&path, mtime);
-            let path = path.to_string_lossy().into_owned();
-            let recorded = Input {
-                path: path.clone(),
-                size: text.len() as u64,
-                mtime,
-                hash: hash(text.as_bytes()),
-            };
-            (path, recorded)
-        }
-    }
-
-    impl Drop for Scratch {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
-    }
-
-    fn set_mtime(path: impl AsRef<Path>, mtime: u64) {
-        let file = fs::File::options().write(true).open(path).unwrap();
-        file.set_modified(UNIX_EPOCH + Duration::from_nanos(mtime)).unwrap();
-    }
-
-    const SECOND: u64 = 1_000_000_000;
-    /// An arbitrary modification time, in 2023.
-    const THEN: u64 = 1_700_000_000 * SECOND;
-
-    #[test]
-    fn an_untouched_file_is_clean_without_being_read() {
-        let scratch = Scratch::new("untouched");
-        let (_, mut recorded) = scratch.file("yio.md", "one", THEN);
-        // A wrong hash proves the file was not read: only the stat is used.
-        recorded.hash ^= 1;
-        let as_of = THEN + 10 * SECOND;
-        assert_eq!(check(&[recorded], as_of, as_of + SECOND), Freshness::Clean);
-    }
-
-    #[test]
-    fn a_changed_file_is_dirty() {
-        let scratch = Scratch::new("changed");
-        let (path, recorded) = scratch.file("yio.md", "one", THEN);
-        let as_of = THEN + 10 * SECOND;
-        let now = as_of + 100 * SECOND;
-
-        fs::write(&path, "longer").unwrap();
-        assert_eq!(check(std::slice::from_ref(&recorded), as_of, now), Freshness::Dirty);
-
-        // Same size, later time: only the contents show the change.
-        fs::write(&path, "two").unwrap();
-        set_mtime(&path, THEN + 50 * SECOND);
-        assert_eq!(check(std::slice::from_ref(&recorded), as_of, now), Freshness::Dirty);
-
-        fs::remove_file(&path).unwrap();
-        assert_eq!(check(&[recorded], as_of, now), Freshness::Dirty);
-    }
-
-    #[test]
-    fn a_touched_file_is_still_clean() {
-        let scratch = Scratch::new("touched");
-        let (path, recorded) = scratch.file("yio.md", "one", THEN);
-        let as_of = THEN + 10 * SECOND;
-        let touched = THEN + 50 * SECOND;
-        set_mtime(&path, touched);
-
-        // Old enough to trust: worth recording the new time.
-        let settled = Input { mtime: touched, ..recorded.clone() };
-        assert_eq!(
-            check(std::slice::from_ref(&recorded), as_of, touched + 10 * SECOND),
-            Freshness::Settled(vec![settled])
-        );
-        // Too recent: clean, but recording it would not help yet.
-        assert_eq!(check(&[recorded], as_of, touched + SECOND), Freshness::Clean);
-    }
-
-    #[test]
-    fn a_file_modified_just_before_recording_is_compared_by_content() {
-        let scratch = Scratch::new("racy");
-        let (path, recorded) = scratch.file("yio.md", "one", THEN);
-        // Recorded one second after the file was written: a second write in
-        // the same timestamp tick would look identical to `stat`.
-        let as_of = THEN + SECOND;
-        let later = THEN + 100 * SECOND;
-        assert_eq!(
-            check(std::slice::from_ref(&recorded), as_of, later),
-            Freshness::Settled(vec![recorded.clone()])
-        );
-
-        fs::write(&path, "two").unwrap();
-        set_mtime(&path, THEN);
-        assert_eq!(check(&[recorded], as_of, later), Freshness::Dirty);
-    }
-
-    #[test]
-    fn the_recorder_notes_each_file_once() {
-        let scratch = Scratch::new("recorder");
-        let (path, expected) = scratch.file("yio.md", "## a\n", THEN);
-        let recorder = Recorder::default();
-        assert_eq!(recorder.read(Path::new(&path)).unwrap(), "## a\n");
-        recorder.read(Path::new(&path)).unwrap();
-        assert!(recorder.read(&scratch.0.join("missing.md")).is_err());
-
-        let inputs = recorder.into_inputs();
-        assert_eq!(inputs.len(), 1);
-        assert_eq!(inputs[0].path, path.replace('\\', "/"));
-        assert_eq!((inputs[0].size, inputs[0].mtime, inputs[0].hash), (5, THEN, expected.hash));
     }
 }

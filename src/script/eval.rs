@@ -5,9 +5,11 @@
 //! everything is an expression.
 
 use std::cell::RefCell;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use super::builtins;
+use crate::input::Input;
 use super::reader::{Error, Form, FormKind, Pos};
 use super::value::{Function, Value};
 
@@ -19,22 +21,30 @@ const KEYWORDS: [&str; 8] = ["var", "set", "if", "do", "fn", "return", "and", "o
 /// the native stack, so this is what turns runaway recursion in a script
 /// into an error instead of a crash.
 ///
-/// Sized for the smallest stack yio runs on, the 1 MiB main thread on
-/// Windows. Measured, one level costs up to about 650 bytes in a release
-/// build and 3.6 KiB in a debug build, so 200 levels use 130 KiB and
-/// 720 KiB. Raising this means running scripts on a thread with a larger
-/// stack first.
-pub const MAX_DEPTH: usize = 200;
+/// Sized against the stack `script::run` provides. See the measurements in
+/// `docs/scripting-language.md`.
+pub const MAX_DEPTH: usize = 2000;
 
-/// Evaluates the top-level forms of a script. Its value is that of the last
-/// form, or whatever a top-level `return` gave.
-pub fn run(forms: &[Form]) -> Result<Value, Error> {
-    let mut interp = Interp { depth: 0 };
+/// What running a script produced.
+#[derive(Debug)]
+pub struct Outcome {
+    /// The value of the last form, or whatever a top-level `return` gave.
+    pub value: Value,
+    /// Everything outside the script that the value depends on. While these
+    /// are unchanged, running the script again would give the same value.
+    pub inputs: Vec<Input>,
+}
+
+/// Evaluates the top-level forms of a script. Relative paths in the script
+/// are resolved against `base`.
+pub(super) fn run(forms: &[Form], base: &Path) -> Result<Outcome, Error> {
+    let mut interp = Interp { depth: 0, base: base.to_path_buf(), inputs: Vec::new() };
     let scope = Rc::new(Scope::default());
-    match interp.block(forms, &scope) {
-        Ok(value) | Err(Flow::Return(value)) => Ok(value),
-        Err(Flow::Error(error)) => Err(error),
-    }
+    let value = match interp.block(forms, &scope) {
+        Ok(value) | Err(Flow::Return(value)) => value,
+        Err(Flow::Error(error)) => return Err(error),
+    };
+    Ok(Outcome { value, inputs: interp.inputs })
 }
 
 /// The variables of one block or function call, and the scope around it.
@@ -108,9 +118,29 @@ fn error(pos: Pos, message: impl Into<String>) -> Error {
 
 pub struct Interp {
     depth: usize,
+    base: PathBuf,
+    inputs: Vec<Input>,
 }
 
 impl Interp {
+    /// Where a path written in the script points, relative to the current
+    /// directory. An empty path is the base directory itself.
+    pub fn resolve(&self, path: &str) -> PathBuf {
+        let path = if path.is_empty() { "." } else { path };
+        if self.base.as_os_str().is_empty() {
+            PathBuf::from(path)
+        } else {
+            self.base.join(path)
+        }
+    }
+
+    /// Notes something the script's value now depends on.
+    pub fn record(&mut self, input: Input) {
+        if !self.inputs.contains(&input) {
+            self.inputs.push(input);
+        }
+    }
+
     /// Calls a function value with arguments that are already evaluated.
     /// `pos` is where the call is, for error messages.
     pub fn call(&mut self, callee: &Value, args: &[Value], pos: Pos) -> Result<Value, Error> {
@@ -359,18 +389,20 @@ pub fn count(n: usize, noun: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use crate::script;
 
     /// The value of a script, printed.
     fn value(source: &str) -> String {
-        match script::run(source.as_bytes()) {
-            Ok(value) => value.to_string(),
+        match script::run(source.as_bytes(), Path::new(""), |outcome| outcome.value.to_string()) {
+            Ok(value) => value,
             Err(error) => panic!("{source}\nfailed: {error}"),
         }
     }
 
     fn failure(source: &str) -> String {
-        match script::run(source.as_bytes()) {
+        match script::run(source.as_bytes(), Path::new(""), |outcome| outcome.value.to_string()) {
             Ok(value) => panic!("{source}\nshould fail but gave {value}"),
             Err(error) => error.to_string(),
         }
@@ -530,7 +562,7 @@ mod tests {
             ("(fn f () 1) (fn f () 2)", "1:13: `f` is already defined here"),
             ("(return 1 2)", "1:1: `return` takes at most one value"),
             ("(+ 1 if)", "1:6: `if` is a keyword; it must come first in a list"),
-            ("(+ 1 \"a\")", "1:1: `+` works on integers, but was given a string"),
+            ("(+ 1 \"a\")", "1:1: `+` needs an integer, but was given a string"),
             ("(/ 1 0)", "1:1: division by zero"),
             ("(% 1 0)", "1:1: division by zero"),
             ("(+ 9223372036854775807 1)", "1:1: `+` overflowed"),
@@ -549,31 +581,39 @@ mod tests {
     #[test]
     fn an_error_inside_a_function_points_at_its_source() {
         let source = "(fn f (x)\n  (+ x \"a\"))\n(f 1)";
-        assert_eq!(failure(source), "2:3: `+` works on integers, but was given a string");
+        assert_eq!(failure(source), "2:3: `+` needs an integer, but was given a string");
     }
 
     #[test]
     fn runaway_recursion_is_an_error() {
         let message = failure("(fn forever (n) (forever (+ n 1))) (forever 0)");
-        assert!(message.contains("nested more than 200 deep"), "{message}");
+        assert!(message.contains("nested more than 2000 deep"), "{message}");
         assert_eq!(value("(fn down (n) (if (= n 0) 0 (down (- n 1)))) (down 60)"), "0");
     }
 
     #[test]
     fn the_depth_limit_fits_the_smallest_stack() {
-        // The main thread on Windows has 1 MiB. If the evaluator's frames
-        // grow enough that the limit no longer fits, this overflows the
-        // stack and takes the test run down with it, which is the signal to
-        // lower MAX_DEPTH.
-        let thread = std::thread::Builder::new().stack_size(1024 * 1024);
-        let handle = thread.spawn(|| {
-            for source in [
-                "(fn forever (n) (forever (+ n 1))) (forever 0)",
-                "(fn forever (n) (if true (do (+ 1 (forever n))))) (forever 0)",
-            ] {
-                assert!(failure(source).contains("nested more than"));
-            }
-        });
-        handle.unwrap().join().unwrap();
+        // Scripts run on the stack that `script::run` gives them. If the
+        // evaluator's frames grow enough that the limit no longer fits it,
+        // this overflows the stack and takes the test run down with it,
+        // which is the signal to lower MAX_DEPTH or raise the stack size.
+        for source in [
+            "(fn forever (n) (forever (+ n 1))) (forever 0)",
+            "(fn forever (n) (if true (do (+ 1 (forever n))))) (forever 0)",
+            // Recursing through a built-in puts its frames on the stack too.
+            "(fn forever (n) (map (list n) forever)) (forever 0)",
+            "(fn forever (n) (filter (list n) forever)) (forever 0)",
+        ] {
+            assert!(failure(source).contains("nested more than"), "{source}");
+        }
+    }
+
+    #[test]
+    fn recursion_can_go_deep_enough_to_walk_a_long_list() {
+        let source = "
+            (fn count (items) (if (is-empty items) 0 (+ 1 (count (rest items)))))
+            (fn upto (n) (if (= n 0) () (append (upto (- n 1)) n)))
+            (count (upto 500))";
+        assert_eq!(value(source), "500");
     }
 }

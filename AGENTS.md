@@ -17,14 +17,15 @@ A Rust crate (edition 2024) with no dependencies. The CLI scaffold exists: it lo
 | `src/cli.rs` | Command-line arguments to a resolved command and its values |
 | `src/help.rs` | Command listings |
 | `src/run.rs` | Runs a script with bash |
-| `src/cache.rs` | `.yio/cache.yio`: encoding, input fingerprints, dirtiness check |
+| `src/cache.rs` | `.yio/cache.yio`: the file format |
+| `src/input.rs` | What a cached result depended on, and whether it still holds |
 | `src/script/reader.rs` | `.yio` source bytes to forms |
 | `src/script/eval.rs` | Evaluates forms: keywords, scopes, functions |
 | `src/script/value.rs` | Script values |
-| `src/script/builtins.rs` | Built-in functions (pure core only so far) |
+| `src/script/builtins.rs` | Built-in functions, including the ones that read files and record inputs |
 | `docs/cli-parsing.md` | The parsing and running rules the above implement |
 | `docs/embedding.md` | How one `yio.md` embeds another |
-| `docs/scripting-language.md` | Plan for the scripting language, cache, and plugins. The reader, evaluator, and command tree cache are implemented; the CLI does not run scripts yet |
+| `docs/scripting-language.md` | Plan for the scripting language, cache, and plugins. The reader, evaluator, built-ins, and command tree cache are implemented; the CLI does not run scripts yet |
 
 ## Repo rules
 

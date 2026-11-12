@@ -17,8 +17,18 @@ pub enum Value {
     Str(Rc<str>),
     Bytes(Rc<[u8]>),
     List(Rc<[Value]>),
+    /// One column of a table: what `col-def` makes.
+    Column(Rc<Column>),
+    /// A table for yio to draw: what `col` makes.
+    Table(Rc<[Rc<Column>]>),
     Fn(Rc<Function>),
     Native(&'static Builtin),
+}
+
+#[derive(PartialEq)]
+pub struct Column {
+    pub header: Rc<str>,
+    pub cells: Rc<[Value]>,
 }
 
 /// A function written in a script.
@@ -71,6 +81,8 @@ impl Value {
             Value::Bytes(_) => "bytes",
             Value::List(items) if items.is_empty() => "the empty value",
             Value::List(_) => "a list",
+            Value::Column(_) => "a column",
+            Value::Table(_) => "a table",
             Value::Fn(_) | Value::Native(_) => "a function",
         }
     }
@@ -85,6 +97,8 @@ impl PartialEq for Value {
             (Value::Str(a), Value::Str(b)) => a == b,
             (Value::Bytes(a), Value::Bytes(b)) => a == b,
             (Value::List(a), Value::List(b)) => a == b,
+            (Value::Column(a), Value::Column(b)) => a == b,
+            (Value::Table(a), Value::Table(b)) => a == b,
             (Value::Fn(a), Value::Fn(b)) => Rc::ptr_eq(a, b),
             (Value::Native(a), Value::Native(b)) => std::ptr::eq(*a, *b),
             _ => false,
@@ -114,13 +128,13 @@ impl fmt::Display for Value {
                 f.write_str("\"")
             }
             Value::Bytes(bytes) => write!(f, "<{} bytes>", bytes.len()),
-            Value::List(items) => {
-                f.write_str("(")?;
-                for (i, item) in items.iter().enumerate() {
-                    if i > 0 {
-                        f.write_str(" ")?;
-                    }
-                    write!(f, "{item}")?;
+            Value::List(items) => write_list(f, items),
+            Value::Column(column) => write_column(f, column),
+            Value::Table(columns) => {
+                f.write_str("(col")?;
+                for column in columns.iter() {
+                    f.write_str(" ")?;
+                    write_column(f, column)?;
                 }
                 f.write_str(")")
             }
@@ -131,6 +145,23 @@ impl fmt::Display for Value {
             Value::Native(builtin) => write!(f, "<fn {}>", builtin.name),
         }
     }
+}
+
+fn write_list(f: &mut fmt::Formatter, items: &[Value]) -> fmt::Result {
+    f.write_str("(")?;
+    for (i, item) in items.iter().enumerate() {
+        if i > 0 {
+            f.write_str(" ")?;
+        }
+        write!(f, "{item}")?;
+    }
+    f.write_str(")")
+}
+
+fn write_column(f: &mut fmt::Formatter, column: &Column) -> fmt::Result {
+    write!(f, "(col-def {} ", Value::Str(Rc::clone(&column.header)))?;
+    write_list(f, &column.cells)?;
+    f.write_str(")")
 }
 
 // A derived `Debug` would follow a function into its scope, and from there

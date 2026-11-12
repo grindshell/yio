@@ -2,18 +2,21 @@ mod cache;
 mod cli;
 mod command;
 mod help;
+mod input;
 mod markdown;
 mod run;
 // Outside tests, nothing runs a script until plugins exist (phase 5 of
 // docs/scripting-language.md). Remove this allowance then.
 #[allow(dead_code)]
 mod script;
+#[cfg(test)]
+mod testing;
 
 use std::io::ErrorKind;
 use std::path::Path;
 use std::process::ExitCode;
 
-use cache::Freshness;
+use input::Freshness;
 use command::Command;
 use markdown::FILE_NAME as FILE;
 
@@ -32,8 +35,8 @@ fn main() -> ExitCode {
 fn run() -> Result<ExitCode, String> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     // Taken before anything is read, so that every input recorded during
-    // this run was read after it. See `cache::check`.
-    let started = cache::now();
+    // this run was read after it. See `input::check`.
+    let started = input::now();
 
     let Tree { root, refresh } = match tree(started) {
         Ok(tree) => tree,
@@ -142,7 +145,7 @@ fn tree(started: u64) -> Result<Tree, String> {
     };
 
     if let Ok(stored) = cache::parse(&file) {
-        let freshness = cache::check(&stored.inputs, stored.as_of, started);
+        let freshness = input::check(&stored.inputs, stored.as_of, started);
         if freshness != Freshness::Dirty
             && let Ok(root) = cache::decode_tree(stored.body)
         {
@@ -174,7 +177,7 @@ fn load(read: markdown::Read) -> Result<Option<Command>, String> {
 /// Loads the tree from the Markdown while recording what was read, and
 /// builds the cache contents that describe it.
 fn load_recorded(as_of: u64) -> Result<(Option<Command>, Option<Vec<u8>>), String> {
-    let recorder = cache::Recorder::default();
+    let recorder = input::Recorder::default();
     let root = load(&|path| recorder.read(path))?;
     let contents = root.as_ref().map(|root| {
         let inputs = recorder.into_inputs();
