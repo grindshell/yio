@@ -3,6 +3,7 @@
 --
 --   yio search             every keyword and built-in
 --   yio search file path   only the rows that mention both words
+--   yio search SORT        the same as `sort`: case does not count
 --
 -- This is what answers the `search` command of the yio.md beside it. A
 -- plugin is told the part of the command line that is for its yio.md, so
@@ -17,8 +18,10 @@
 -- What follows `search`, apart from the `--` that ends the flags.
 (var terms (filter (rest words) (fn (word) (not (= word "--")))))
 
+-- Lowering both sides is how text is matched without regard to case.
 (fn mentions-every-term (text)
-  (is-empty (filter terms (fn (term) (not (contains text term))))))
+  (var lowered (lower text))
+  (is-empty (filter terms (fn (term) (not (contains lowered (lower term)))))))
 
 -- A row of the document's tables that describes a call starts like this.
 (var marker "| `(")

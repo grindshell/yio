@@ -155,7 +155,7 @@ yio search dir path
 ```
 
 ```
-5 of 62 calls mention: dir path
+5 of 66 calls mention: dir path
 Call               Group           Gives
 -----------------  --------------  ---------------------------------------------------------------
 (list-dir [path])  Reading files   The entries of a directory, sorted by name

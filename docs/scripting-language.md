@@ -97,10 +97,11 @@ Every value except a function has a binary encoding of one tag byte plus payload
 | Does a dirty cache refresh itself, or only on `--cache`? | It refreshes itself |
 | With a cache, do `.bash` plugins still run on every access? | Yes |
 | Does `post/` run after `yio.md` is loaded, or after the chosen command finishes? | After it is loaded |
+| How does text match without regard to case? | By lowering both sides with `lower`. No case-ignoring twin of each text function |
+| How does `sort` order things other than integers and strings? | Through a key function, not a comparison function |
 
 ## Not done
 
 - Removing a directory and its contents in one call.
-- Text functions that ignore case.
 - Fitting what is drawn to the width of the terminal, and a plain-ASCII form of boxes, bars, and trees.
 - Right-aligned table columns, and wrapping long cells.

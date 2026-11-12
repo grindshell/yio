@@ -171,12 +171,15 @@ These work on the text of a path. Nothing is looked up.
 | `(replace text from to)` | The text with every occurrence replaced |
 | `(str value...)` | The values as text, run together |
 | `(int text)` | The whole number the text holds, or `()` if it does not hold one |
+| `(lower text)` | The text in lower case |
+| `(upper text)` | The text in upper case |
 
 - `split` and `replace` need a separator or search text that is not empty.
 - `contains` also takes a list: `(contains (list 1 2) 2)`.
 - `str` uses strings as they are, adds nothing for `()`, and writes anything else the way a script would.
 - `int` is for numbers read out of files, which arrive as text: `(int "1800")` is `1800`. It takes digits with an optional sign, and ignores whitespace around them. Anything else, such as `""`, `"n/a"`, `"1.5"`, or a number too large to hold, gives `()` and not an error, so a script can say what a missing number counts as: `(or (int words) 0)`. Given an integer, it gives it back.
-- Matching is exact. Nothing here ignores case.
+- **Matching is exact**, case included. To match without regard to case, lower both sides and use the ordinary function: `(contains (lower text) (lower word))`, `(= (lower a) (lower b))`. There are no case-ignoring forms of the functions themselves.
+- `lower` and `upper` follow Unicode, not only ASCII, and take no account of language: `(upper "straße")` is `"STRASSE"`.
 
 ### Lists
 
@@ -191,9 +194,15 @@ These work on the text of a path. Nothing is looked up.
 | `(append list item...)` | A new list with the items added at the end |
 | `(map list function)` | A list of the results of calling the function on each item |
 | `(filter list function)` | A list of the items for which the function gives a true value |
+| `(sort list [key])` | A list of the items in ascending order, by themselves or by what the key function gives for each |
+| `(reverse list)` | A list of the items from last to first |
 
 - `nth` with an index outside the list is an error. `first` of an empty list is not.
 - `map` and `filter` take the list first and work only on lists. The function takes one argument.
+- **`sort`** orders integers or strings, the two kinds `<` compares, and a list has to be all of one kind. Anything else is ordered through a key, a function of one argument that gives an integer or a string for each item: `(sort files file-size)`, `(sort rows (fn (row) (nth row 1)))`.
+- Strings are ordered as `<` orders them, by character code, which puts every capital before every lower-case letter: `"Zebra"` comes before `"apple"`. `(sort names lower)` orders them without regard to case.
+- Items that order the same keep the order they had. So to order by status and, within a status, by name, sort by name first and then by status.
+- Descending order is `(reverse (sort list))`.
 
 ### Tables
 

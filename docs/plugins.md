@@ -89,11 +89,11 @@ So a plugin sees the same words whether `yio` is run in its own directory or its
 
 ## An example
 
-This directory has one. [`.yio/pre/0000_api.yio`](.yio/pre/0000_api.yio) answers the `search` command of [yio.md](yio.md). It reads the tables out of [scripting-api.md](scripting-api.md) and draws the rows that mention every word it was told:
+This directory has one. [`.yio/pre/0000_api.yio`](.yio/pre/0000_api.yio) answers the `search` command of [yio.md](yio.md). It reads the tables out of [scripting-api.md](scripting-api.md) and draws the rows that mention every word it was told, whatever case they are typed in:
 
 ```
 $ yio search dir path
-5 of 62 calls mention: dir path
+5 of 66 calls mention: dir path
 Call               Group           Gives
 -----------------  --------------  ---------------------------------------------------------------
 (list-dir [path])  Reading files   The entries of a directory, sorted by name

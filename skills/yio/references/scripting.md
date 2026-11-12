@@ -135,8 +135,10 @@ A script evaluates to the value of its last top-level expression, or to what a t
 | `(replace text from to)` | The text with every occurrence replaced |
 | `(str value...)` | The values as text, run together |
 | `(int text)` | The whole number the text holds, or `()` if it does not hold one |
+| `(lower text)` | The text in lower case |
+| `(upper text)` | The text in upper case |
 
-- Matching is exact and case-sensitive. There are no regular expressions.
+- Matching is exact and case-sensitive. To ignore case, lower both sides: `(contains (lower text) (lower word))`. There are no regular expressions.
 - `join` takes strings only, so turn numbers into text with `str` first.
 - `lines` drops `\r\n` endings as well as `\n`.
 - **A number read out of a file is a string** until `int` turns it into one: `(+ 1 "1800")` is an error, `(+ 1 (int "1800"))` is not. `int` takes digits with an optional sign and ignores whitespace around them. Anything else (`""`, `"n/a"`, `"1.5"`) gives `()`, not an error, so say what a missing number counts as: `(or (int words) 0)`.
@@ -155,8 +157,14 @@ A script evaluates to the value of its last top-level expression, or to what a t
 | `(append list item...)` | A new list with the items added at the end |
 | `(map list function)` | A list of the results of calling the function on each item |
 | `(filter list function)` | A list of the items for which the function gives a true value |
+| `(sort list [key])` | A list of the items in ascending order, by themselves or by what the key function gives for each |
+| `(reverse list)` | A list of the items from last to first |
 
-`map` and `filter` take the list first, then a function of one argument. `nth` outside the list is an error; `first` of an empty list is `()`.
+- `map` and `filter` take the list first, then a function of one argument. `nth` outside the list is an error; `first` of an empty list is `()`.
+- `sort` orders integers or strings, all of one kind. Order anything else through a key, a function of one argument that gives an integer or a string: `(sort files file-size)`, `(sort rows (fn (row) (nth row 1)))`. There is no comparison function.
+- Strings sort by character code, so every capital comes before every lower-case letter. `(sort names lower)` ignores case.
+- The sort is stable. To order by status and, within a status, by name, sort by name first and then by status.
+- Descending is `(reverse (sort list))`.
 
 ### Tables
 
@@ -278,6 +286,12 @@ So a heading, a table, and a note is `(list "Heading" (col ...) "Note")`, and a 
   found)
 ```
 
+**Largest first.** Sort by a key, then reverse:
+
+```lisp
+(var by-size (reverse (sort files file-size)))
+```
+
 **Only some files:** `(filter (list-dir "notes") (fn (path) (= (extension path) "md")))`.
 
 **Walk a directory tree** by recursion, with `is-dir` deciding where to descend:
@@ -299,5 +313,7 @@ So a heading, a table, and a note is `(list "Heading" (col ...) "Note")`, and a 
 - **Building a table by row.** `col` takes columns.
 - **Reaching for the clock, randomness, the network, or another program.** None exist here, on purpose: a result that depended on one could not be replayed from the cache. Write that plugin in bash.
 - **Adding up numbers read from files without `int`.** They are strings until converted.
-- **Sorting, regular expressions, case-insensitive matching.** Not available. `list-dir` is already sorted by name.
+- **Passing `sort` a comparison function.** It takes a key function of one argument.
+- **Expecting a match to ignore case.** `contains`, `starts-with`, and `=` are exact. Lower both sides first.
+- **Regular expressions.** Not available.
 - **Returning a function**, or a list with one in it, is an error.

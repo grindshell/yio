@@ -62,6 +62,8 @@ static BUILTINS: &[Builtin] = &[
     Builtin { name: "replace", call: replace },
     Builtin { name: "str", call: concatenate },
     Builtin { name: "int", call: int },
+    Builtin { name: "lower", call: |_, args, pos| recase("lower", args, pos, str::to_lowercase) },
+    Builtin { name: "upper", call: |_, args, pos| recase("upper", args, pos, str::to_uppercase) },
     // Lists.
     Builtin { name: "list", call: |_, args, _| Ok(Value::list(args.to_vec())) },
     Builtin { name: "is-empty", call: is_empty },
@@ -72,6 +74,8 @@ static BUILTINS: &[Builtin] = &[
     Builtin { name: "append", call: append },
     Builtin { name: "map", call: map },
     Builtin { name: "filter", call: filter },
+    Builtin { name: "sort", call: sort },
+    Builtin { name: "reverse", call: reverse },
     // Tables.
     Builtin { name: "col-def", call: col_def },
     Builtin { name: "col", call: col },
@@ -552,6 +556,17 @@ fn int(_: &mut Interp, args: &[Value], pos: Pos) -> Result<Value, Error> {
     }
 }
 
+/// `(lower text)` and `(upper text)`: the text in one case.
+///
+/// These are also how text is matched without regard to case. There are no
+/// case-ignoring forms of `contains`, `=`, and the rest: a script lowers
+/// both sides and uses the ordinary one, and `(sort names lower)` orders
+/// names the same way.
+fn recase(name: &str, args: &[Value], pos: Pos, change: fn(&str) -> String) -> Result<Value, Error> {
+    arity(name, args, 1, pos)?;
+    Ok(Value::str(&change(string(name, &args[0], pos)?)))
+}
+
 /// Whether a list or a string has nothing in it.
 fn is_empty(_: &mut Interp, args: &[Value], pos: Pos) -> Result<Value, Error> {
     arity("is-empty", args, 1, pos)?;
@@ -633,6 +648,59 @@ fn filter(interp: &mut Interp, args: &[Value], pos: Pos) -> Result<Value, Error>
         }
     }
     Ok(Value::list(kept))
+}
+
+/// `(sort list)` or `(sort list key)`: the items in ascending order, by
+/// themselves or by what the function gives for each.
+///
+/// What is ordered has to be all integers or all strings, the same two
+/// kinds `<` compares, and strings go in the same order `<` puts them in.
+/// Items that order the same keep the order they had.
+fn sort(interp: &mut Interp, args: &[Value], pos: Pos) -> Result<Value, Error> {
+    let (list, key) = match args {
+        [list] => (list, None),
+        [list, key] => (list, Some(key)),
+        _ => {
+            let given = args.len();
+            return Err(error(pos, format!("`sort` takes 1 or 2 arguments but was given {given}")));
+        }
+    };
+    let items = Rc::clone(items("sort", list, pos)?);
+    // What each item is ordered by. The function is called once per item,
+    // in the list's order, before anything is moved.
+    let mut keys = Vec::with_capacity(items.len());
+    for item in items.iter() {
+        keys.push(match key {
+            Some(key) => interp.call(key, std::slice::from_ref(item), pos)?,
+            None => item.clone(),
+        });
+    }
+    // Checked here, since nothing can fail once the sorting has started.
+    for key in &keys {
+        match (&keys[0], key) {
+            (Value::Int(_), Value::Int(_)) | (Value::Str(_), Value::Str(_)) => {}
+            (Value::Int(_) | Value::Str(_), other) => {
+                let first = keys[0].type_name();
+                return Err(error(pos, format!("`sort` cannot order {first} with {}", other.type_name())));
+            }
+            (other, _) => return Err(wrong("sort", "integers or strings to order", other, pos)),
+        }
+    }
+    let mut order: Vec<usize> = (0..items.len()).collect();
+    order.sort_by(|&a, &b| match (&keys[a], &keys[b]) {
+        (Value::Int(a), Value::Int(b)) => a.cmp(b),
+        (Value::Str(a), Value::Str(b)) => a.cmp(b),
+        _ => Ordering::Equal,
+    });
+    Ok(Value::list(order.into_iter().map(|index| items[index].clone()).collect()))
+}
+
+/// `(reverse list)`: the items from last to first. After `sort`, that is
+/// descending order.
+fn reverse(_: &mut Interp, args: &[Value], pos: Pos) -> Result<Value, Error> {
+    arity("reverse", args, 1, pos)?;
+    let items = items("reverse", &args[0], pos)?;
+    Ok(Value::list(items.iter().rev().cloned().collect()))
 }
 
 /// The drawing built-ins: `style`, `box`, `row`, `rule`, `bar`, `tree`, and
@@ -749,6 +817,46 @@ mod tests {
         assert_eq!(failure("(int true)"), "1:1: `int` needs a string or an integer, but was given a boolean");
         assert_eq!(value(r#"(list (len "caf\u00e9") (len "") (len (list 1 2 3)) (len ()) (len #4:abcd))"#.replace("\\u00e9", "\u{e9}").as_str()), "(4 0 3 0 4)");
         assert_eq!(value(r#"(list (is-empty "") (is-empty "a") (is-empty ()) (is-empty (list 1)))"#), "(true false true false)");
+    }
+
+    #[test]
+    fn case() {
+        assert_eq!(value(r#"(list (lower "Dragons FLY") (upper "Dragons fly") (lower "") (upper "42 ok"))"#), r#"("dragons fly" "DRAGONS FLY" "" "42 OK")"#);
+        // Beyond ASCII too, where a letter may become two.
+        assert_eq!(value("(list (lower \"\u{c9}T\u{c9}\") (upper \"stra\u{df}e\"))"), "(\"\u{e9}t\u{e9}\" \"STRASSE\")");
+        // Matching without regard to case is the ordinary match on lowered text.
+        assert_eq!(value(r#"(list (contains "The Ferry" "ferry") (contains (lower "The Ferry") (lower "FERRY")))"#), "(false true)");
+        assert_eq!(value(r#"(= (lower "README.md") (lower "Readme.MD"))"#), "true");
+        assert_eq!(failure("(lower 1)"), "1:1: `lower` needs a string, but was given an integer");
+        assert_eq!(failure(r#"(upper "a" "b")"#), "1:1: `upper` takes 1 argument but was given 2");
+    }
+
+    #[test]
+    fn sorting() {
+        assert_eq!(value("(sort (list 3 -1 2 10 2))"), "(-1 2 2 3 10)");
+        assert_eq!(value(r#"(sort (list "pear" "Apple" "fig" "apple"))"#), r#"("Apple" "apple" "fig" "pear")"#);
+        assert_eq!(value("(list (sort ()) (sort (list 1)) (reverse ()) (reverse (list 1 \"b\" true)))"), "(() (1) () (true \"b\" 1))");
+        // The list it was given is unchanged.
+        assert_eq!(value("(var l (list 2 1)) (list (sort l) (reverse l) l)"), "((1 2) (1 2) (2 1))");
+        // By a key: the length, a field of a row, the lowered text.
+        assert_eq!(value(r#"(sort (list "ccc" "a" "bb") len)"#), r#"("a" "bb" "ccc")"#);
+        assert_eq!(value(r#"(sort (list (list "b" 2) (list "a" 3) (list "c" 1)) (fn (row) (nth row 1)))"#), r#"(("c" 1) ("b" 2) ("a" 3))"#);
+        assert_eq!(value(r#"(sort (list "pear" "Apple" "fig") lower)"#), r#"("Apple" "fig" "pear")"#);
+        // Items that order the same keep the order they came in.
+        assert_eq!(value(r#"(sort (list "bb" "a" "cc" "d" "aa") len)"#), r#"("a" "d" "bb" "cc" "aa")"#);
+        assert_eq!(value(r#"(sort (list "b" "A" "a" "B") lower)"#), r#"("A" "a" "b" "B")"#);
+        // Descending is the reverse.
+        assert_eq!(value("(reverse (sort (list 3 1 2)))"), "(3 2 1)");
+
+        assert_eq!(failure(r#"(sort (list 1 "a"))"#), "1:1: `sort` cannot order an integer with a string");
+        assert_eq!(failure(r#"(sort (list "a" "b" 3))"#), "1:1: `sort` cannot order a string with an integer");
+        assert_eq!(failure("(sort (list true false))"), "1:1: `sort` needs integers or strings to order, but was given a boolean");
+        assert_eq!(failure("(sort (list 1 2) (fn (n) (list n)))"), "1:1: `sort` needs integers or strings to order, but was given a list");
+        assert_eq!(failure("(sort 1)"), "1:1: `sort` needs a list, but was given an integer");
+        assert_eq!(failure("(sort)"), "1:1: `sort` takes 1 or 2 arguments but was given 0");
+        assert_eq!(failure("(sort (list 1) len len)"), "1:1: `sort` takes 1 or 2 arguments but was given 3");
+        assert_eq!(failure("(sort (list 1 2) (fn (a b) a))"), "1:1: `this function` takes 2 arguments but was given 1");
+        assert_eq!(failure("(reverse \"abc\")"), "1:1: `reverse` needs a list, but was given a string");
     }
 
     #[test]
@@ -1124,6 +1232,9 @@ mod tests {
                  (col-def \"Gives\" (\"Makes a directory, and any missing above it, and gives the path\"))))"
             )
         );
+        // Case does not count.
+        let shouted = table("search MAKE-DIR");
+        assert!(shouted.starts_with("(\"1 of ") && shouted.contains("(make-dir path)"));
         // Every word has to be mentioned.
         let both = table("search file path");
         assert!(both.contains("calls mention: file path") && both.contains("(read-file path)"));
