@@ -2,71 +2,86 @@
 //! its contents are still current is decided by `input.rs`. See
 //! `docs/scripting-language.md`.
 //!
-//! The file is one `.yio` form, `(cache #<length>:<payload>)`. The payload is
-//! a custom binary encoding: integers are fixed-width little-endian and a
-//! string is a `u32` length followed by UTF-8.
+//! The file is one `.yio` form, `(cache #<length>:<payload>)`. The payload
+//! uses the encoding of `bytes.rs`:
 //!
 //! ```text
 //! u8   format version
 //! str  yio version
-//! u64  as-of time, ns since the Unix epoch
 //! u32  unit count
 //! unit:
 //!   u8   kind
 //!   str  source path
+//!   u64  as-of time, ns since the Unix epoch
 //!   u32  input count
 //!   input: u8 kind, then the fields of that kind (see `put_input`)
 //!   u32  body length
 //!   body
 //! ```
 //!
-//! A unit is one independently cached result together with the inputs it was
-//! computed from. The only kind so far is the command tree.
+//! A unit is one independently cached result together with the inputs it
+//! was computed from and when. There are two kinds: the command tree, and
+//! the value of one `.yio` plugin.
 
+use std::cell::{Cell, RefCell};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+use crate::bytes::{Reader, put_bytes, put_len, put_option, put_str, put_u8, put_u32, put_u64};
 use crate::cli::VERSION;
 use crate::command::{Command, Flag, FlagType, Param};
 use crate::input::{Input, PathKind};
-use crate::markdown::FILE_NAME;
 
 pub const FILE: &str = ".yio/cache.yio";
 
 /// Bumped whenever the payload layout changes.
-const FORMAT: u8 = 1;
+const FORMAT: u8 = 2;
 const PREFIX: &[u8] = b"(cache #";
-const TREE_UNIT: u8 = 1;
 
 /// How deeply commands may nest in a cache file. Real trees stay far below
 /// this; it stops a damaged file from overflowing the stack.
 const MAX_DEPTH: usize = 256;
 
-/// The command tree unit of a cache file.
-pub struct Stored<'a> {
-    pub as_of: u64,
-    pub inputs: Vec<Input>,
-    /// The encoded tree, for `decode_tree`.
-    pub body: &'a [u8],
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum UnitKind {
+    /// The command tree. The body is for `decode_tree`.
+    Tree,
+    /// The value of a `.yio` plugin. The body is for `script::encode`.
+    Script,
 }
 
-/// Builds the contents of a cache file holding one command tree.
-pub fn serialize(as_of: u64, inputs: &[Input], tree: &[u8]) -> Vec<u8> {
+/// One cached result.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Unit {
+    pub kind: UnitKind,
+    /// The file the result came from: `yio.md`, or a plugin's path.
+    pub source: String,
+    /// When the inputs were recorded. See `input::check`.
+    pub as_of: u64,
+    pub inputs: Vec<Input>,
+    pub body: Vec<u8>,
+}
+
+/// Builds the contents of a cache file.
+pub fn serialize(units: &[Unit]) -> Vec<u8> {
     let mut payload = Vec::new();
     put_u8(&mut payload, FORMAT);
     put_str(&mut payload, VERSION);
-    put_u64(&mut payload, as_of);
-
-    put_len(&mut payload, 1);
-    put_u8(&mut payload, TREE_UNIT);
-    put_str(&mut payload, FILE_NAME);
-    put_len(&mut payload, inputs.len());
-    for input in inputs {
-        put_input(&mut payload, input);
+    put_len(&mut payload, units.len());
+    for unit in units {
+        put_u8(&mut payload, match unit.kind {
+            UnitKind::Tree => 1,
+            UnitKind::Script => 2,
+        });
+        put_str(&mut payload, &unit.source);
+        put_u64(&mut payload, unit.as_of);
+        put_len(&mut payload, unit.inputs.len());
+        for input in &unit.inputs {
+            put_input(&mut payload, input);
+        }
+        put_bytes(&mut payload, &unit.body);
     }
-    put_len(&mut payload, tree.len());
-    payload.extend_from_slice(tree);
 
     let mut file = format!("(cache #{}:", payload.len()).into_bytes();
     file.extend_from_slice(&payload);
@@ -74,10 +89,9 @@ pub fn serialize(as_of: u64, inputs: &[Input], tree: &[u8]) -> Vec<u8> {
     file
 }
 
-/// Reads the header and unit table of a cache file without decoding any
-/// unit's body. Fails if the file is damaged or was written by a different
-/// version of yio.
-pub fn parse(file: &[u8]) -> Result<Stored<'_>, String> {
+/// Reads a cache file's units without decoding their bodies. Fails if the
+/// file is damaged or was written by a different version of yio.
+pub fn parse(file: &[u8]) -> Result<Vec<Unit>, String> {
     // This does not go through the general reader: the shape is fixed, so
     // the payload can be found directly.
     let rest = file.strip_prefix(PREFIX).ok_or("not a cache file")?;
@@ -95,31 +109,34 @@ pub fn parse(file: &[u8]) -> Result<Stored<'_>, String> {
         return Err("cache is not closed".to_string());
     }
 
-    let mut bytes = Bytes { data: payload };
-    if bytes.u8()? != FORMAT {
+    let mut reader = Reader::new(payload);
+    if reader.u8()? != FORMAT {
         return Err("cache has a different format version".to_string());
     }
-    if bytes.str()? != VERSION {
+    if reader.str()? != VERSION {
         return Err("cache was written by a different yio version".to_string());
     }
-    let as_of = bytes.u64()?;
 
-    let mut tree = None;
-    for _ in 0..bytes.u32()? {
-        let kind = bytes.u8()?;
-        let _source = bytes.str()?;
+    let mut units = Vec::new();
+    for _ in 0..reader.u32()? {
+        let kind = match reader.u8()? {
+            1 => UnitKind::Tree,
+            2 => UnitKind::Script,
+            _ => return Err("cache has an unknown kind of unit".to_string()),
+        };
+        let source = reader.str()?.to_string();
+        let as_of = reader.u64()?;
         let mut inputs = Vec::new();
-        for _ in 0..bytes.u32()? {
-            inputs.push(take_input(&mut bytes)?);
+        for _ in 0..reader.u32()? {
+            inputs.push(take_input(&mut reader)?);
         }
-        let length = bytes.u32()? as usize;
-        let body = bytes.take(length)?;
-        // The length is what lets a unit be passed over without decoding it.
-        if kind == TREE_UNIT {
-            tree = Some(Stored { as_of, inputs, body });
-        }
+        let body = reader.bytes()?.to_vec();
+        units.push(Unit { kind, source, as_of, inputs, body });
     }
-    tree.ok_or_else(|| "cache has no command tree".to_string())
+    if !reader.is_empty() {
+        return Err("cache has data after its last unit".to_string());
+    }
+    Ok(units)
 }
 
 /// Writes the cache file, creating `.yio/` if needed. The file is replaced
@@ -143,6 +160,85 @@ pub fn remove() -> io::Result<bool> {
         Ok(()) => Ok(true),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
         Err(error) => Err(error),
+    }
+}
+
+/// The cache over the course of one run: what the file held at the start,
+/// and what it should hold at the end.
+///
+/// Each result the run needs is either taken from the file with `find` and
+/// kept with `keep`, or computed and added with `put`. Whatever is neither
+/// kept nor put is dropped from the file, which is how the result of a
+/// plugin that no longer exists goes away.
+pub struct Session {
+    /// Whether there was a cache file. Its existing is what turns caching
+    /// on.
+    existed: bool,
+    /// Whether results should be recorded at all.
+    active: bool,
+    stored: Vec<Unit>,
+    current: RefCell<Vec<Unit>>,
+    changed: Cell<bool>,
+}
+
+impl Session {
+    /// Opens the cache file of the current directory. With `fresh`, what
+    /// the file holds is ignored and everything is computed again, which is
+    /// what `--cache` asks for.
+    pub fn open(fresh: bool) -> Session {
+        Session::from_file(fs::read(FILE).ok().as_deref(), fresh)
+    }
+
+    pub(crate) fn from_file(file: Option<&[u8]>, fresh: bool) -> Session {
+        let existed = file.is_some();
+        // A file that cannot be used counts as out of date, so that it gets
+        // replaced.
+        let (stored, changed) = match file.map(parse) {
+            Some(Ok(units)) if !fresh => (units, false),
+            Some(_) => (Vec::new(), true),
+            None => (Vec::new(), false),
+        };
+        Session {
+            existed,
+            active: existed || fresh,
+            stored,
+            current: RefCell::default(),
+            changed: Cell::new(changed),
+        }
+    }
+
+    /// Whether this run records results. When it does not, there is no
+    /// point in gathering what a unit would need.
+    pub fn active(&self) -> bool {
+        self.active
+    }
+
+    /// A result the file held at the start of the run.
+    pub fn find(&self, kind: UnitKind, source: &str) -> Option<&Unit> {
+        self.stored.iter().find(|unit| unit.kind == kind && unit.source == source)
+    }
+
+    /// Carries a stored result over unchanged.
+    pub fn keep(&self, unit: &Unit) {
+        self.current.borrow_mut().push(unit.clone());
+    }
+
+    /// Records a result that is new or differs from what was stored.
+    pub fn put(&self, unit: Unit) {
+        self.current.borrow_mut().push(unit);
+        self.changed.set(true);
+    }
+
+    /// The contents the cache file should have after this run.
+    pub fn contents(&self) -> Vec<u8> {
+        serialize(&self.current.borrow())
+    }
+
+    /// The new contents for the cache file, if there was one and this run
+    /// left it out of date.
+    pub fn refreshed(&self) -> Option<Vec<u8>> {
+        let dropped = self.stored.len() != self.current.borrow().len();
+        (self.existed && (self.changed.get() || dropped)).then(|| self.contents())
     }
 }
 
@@ -191,17 +287,17 @@ fn put_input(out: &mut Vec<u8>, input: &Input) {
     }
 }
 
-fn take_input(bytes: &mut Bytes) -> Result<Input, String> {
-    let kind = bytes.u8()?;
-    let path = bytes.str()?.to_string();
+fn take_input(reader: &mut Reader) -> Result<Input, String> {
+    let kind = reader.u8()?;
+    let path = reader.str()?.to_string();
     Ok(match kind {
         FILE_INPUT => {
-            Input::File { path, size: bytes.u64()?, mtime: bytes.u64()?, hash: bytes.u64()? }
+            Input::File { path, size: reader.u64()?, mtime: reader.u64()?, hash: reader.u64()? }
         }
-        DIR_INPUT => Input::Dir { path, mtime: bytes.u64()?, hash: bytes.u64()? },
+        DIR_INPUT => Input::Dir { path, mtime: reader.u64()?, hash: reader.u64()? },
         KIND_INPUT => Input::Kind {
             path,
-            kind: match bytes.u8()? {
+            kind: match reader.u8()? {
                 0 => PathKind::Missing,
                 1 => PathKind::File,
                 2 => PathKind::Dir,
@@ -209,10 +305,10 @@ fn take_input(bytes: &mut Bytes) -> Result<Input, String> {
                 _ => return Err("cache has an unknown kind of path".to_string()),
             },
         },
-        SIZE_INPUT => Input::Size { path, size: bytes.u64()? },
+        SIZE_INPUT => Input::Size { path, size: reader.u64()? },
         ENV_INPUT => {
-            let set = bytes.u8()? != 0;
-            let hash = bytes.u64()?;
+            let set = reader.u8()? != 0;
+            let hash = reader.u64()?;
             Input::Env { name: path, hash: set.then_some(hash) }
         }
         _ => return Err("cache has an unknown kind of input".to_string()),
@@ -263,124 +359,55 @@ fn put_command(out: &mut Vec<u8>, command: &Command) {
 
 /// Decodes what `encode_tree` produced.
 pub fn decode_tree(body: &[u8]) -> Result<Command, String> {
-    let mut bytes = Bytes { data: body };
-    let root = take_command(&mut bytes, 0)?;
-    if !bytes.data.is_empty() {
+    let mut reader = Reader::new(body);
+    let root = take_command(&mut reader, 0)?;
+    if !reader.is_empty() {
         return Err("cache has data after the command tree".to_string());
     }
     Ok(root)
 }
 
-fn take_command(bytes: &mut Bytes, depth: usize) -> Result<Command, String> {
+fn take_command(reader: &mut Reader, depth: usize) -> Result<Command, String> {
     if depth > MAX_DEPTH {
         return Err("cache nests commands too deeply".to_string());
     }
     let mut command = Command {
-        name: bytes.str()?.to_string(),
-        short_help: bytes.option()?,
-        long_help: bytes.option()?,
-        dir: bytes.option()?.map(PathBuf::from),
+        name: reader.str()?.to_string(),
+        short_help: reader.option()?,
+        long_help: reader.option()?,
+        dir: reader.option()?.map(PathBuf::from),
         ..Command::default()
     };
-    for _ in 0..bytes.u32()? {
+    for _ in 0..reader.u32()? {
         command.params.push(Param {
-            name: bytes.str()?.to_string(),
-            required: bytes.u8()? != 0,
+            name: reader.str()?.to_string(),
+            required: reader.u8()? != 0,
         });
     }
-    for _ in 0..bytes.u32()? {
+    for _ in 0..reader.u32()? {
         command.flags.push(Flag {
-            name: bytes.str()?.to_string(),
-            short: match bytes.u32()? {
+            name: reader.str()?.to_string(),
+            short: match reader.u32()? {
                 0 => None,
                 code => Some(char::from_u32(code).ok_or("cache has an invalid flag")?),
             },
-            long: bytes.option()?,
-            ty: match bytes.u8()? {
+            long: reader.option()?,
+            ty: match reader.u8()? {
                 0 => FlagType::String,
                 1 => FlagType::Boolean,
                 _ => return Err("cache has an unknown flag type".to_string()),
             },
-            default: bytes.option()?,
-            description: bytes.option()?,
+            default: reader.option()?,
+            description: reader.option()?,
         });
     }
-    for _ in 0..bytes.u32()? {
-        command.scripts.push(bytes.str()?.to_string());
+    for _ in 0..reader.u32()? {
+        command.scripts.push(reader.str()?.to_string());
     }
-    for _ in 0..bytes.u32()? {
-        command.subcommands.push(take_command(bytes, depth + 1)?);
+    for _ in 0..reader.u32()? {
+        command.subcommands.push(take_command(reader, depth + 1)?);
     }
     Ok(command)
-}
-
-fn put_u8(out: &mut Vec<u8>, value: u8) {
-    out.push(value);
-}
-
-fn put_u32(out: &mut Vec<u8>, value: u32) {
-    out.extend_from_slice(&value.to_le_bytes());
-}
-
-fn put_u64(out: &mut Vec<u8>, value: u64) {
-    out.extend_from_slice(&value.to_le_bytes());
-}
-
-fn put_len(out: &mut Vec<u8>, length: usize) {
-    put_u32(out, u32::try_from(length).expect("nothing in a yio.md reaches 4 GiB"));
-}
-
-fn put_str(out: &mut Vec<u8>, text: &str) {
-    put_len(out, text.len());
-    out.extend_from_slice(text.as_bytes());
-}
-
-fn put_option(out: &mut Vec<u8>, text: Option<&str>) {
-    put_u8(out, u8::from(text.is_some()));
-    if let Some(text) = text {
-        put_str(out, text);
-    }
-}
-
-/// The unread remainder of a payload. Every read is bounds-checked, so a
-/// damaged file produces an error rather than a panic.
-struct Bytes<'a> {
-    data: &'a [u8],
-}
-
-impl<'a> Bytes<'a> {
-    fn take(&mut self, length: usize) -> Result<&'a [u8], String> {
-        let (taken, rest) = self.data.split_at_checked(length).ok_or("cache is truncated")?;
-        self.data = rest;
-        Ok(taken)
-    }
-
-    fn u8(&mut self) -> Result<u8, String> {
-        Ok(self.take(1)?[0])
-    }
-
-    fn u32(&mut self) -> Result<u32, String> {
-        let bytes = self.take(4)?.try_into().expect("took four bytes");
-        Ok(u32::from_le_bytes(bytes))
-    }
-
-    fn u64(&mut self) -> Result<u64, String> {
-        let bytes = self.take(8)?.try_into().expect("took eight bytes");
-        Ok(u64::from_le_bytes(bytes))
-    }
-
-    fn str(&mut self) -> Result<&'a str, String> {
-        let length = self.u32()? as usize;
-        let bytes = self.take(length)?;
-        std::str::from_utf8(bytes).map_err(|_| "cache has text that is not UTF-8".to_string())
-    }
-
-    fn option(&mut self) -> Result<Option<String>, String> {
-        match self.u8()? {
-            0 => Ok(None),
-            _ => Ok(Some(self.str()?.to_string())),
-        }
-    }
 }
 
 #[cfg(test)]
@@ -430,6 +457,26 @@ echo \"two\"
         Input::File { path: path.to_string(), size: 3, mtime: 42, hash: 7 }
     }
 
+    fn tree_unit() -> Unit {
+        Unit {
+            kind: UnitKind::Tree,
+            source: "yio.md".to_string(),
+            as_of: 1234,
+            inputs: vec![input("yio.md"), input("docs/yio.md")],
+            body: encode_tree(&tree()),
+        }
+    }
+
+    fn script_unit(source: &str) -> Unit {
+        Unit {
+            kind: UnitKind::Script,
+            source: source.to_string(),
+            as_of: 99,
+            inputs: vec![input(source)],
+            body: vec![1, 2, 3],
+        }
+    }
+
     #[test]
     fn a_tree_survives_a_round_trip() {
         let root = tree();
@@ -438,18 +485,14 @@ echo \"two\"
 
     #[test]
     fn a_file_survives_a_round_trip() {
-        let inputs = [input("yio.md"), input("docs/yio.md")];
-        let body = encode_tree(&tree());
-        let file = serialize(1234, &inputs, &body);
-        let stored = parse(&file).unwrap();
-        assert_eq!(stored.as_of, 1234);
-        assert_eq!(stored.inputs, inputs);
-        assert_eq!(stored.body, body);
+        let units = [tree_unit(), script_unit(".yio/pre/1_a.yio"), script_unit("docs/.yio/post/2_b.yio")];
+        assert_eq!(parse(&serialize(&units)).unwrap(), units);
+        assert_eq!(parse(&serialize(&[])).unwrap(), []);
     }
 
     #[test]
     fn every_kind_of_input_survives_a_round_trip() {
-        let inputs = [
+        let inputs = vec![
             input("yio.md"),
             Input::Dir { path: "lore".to_string(), mtime: 9, hash: u64::MAX },
             Input::Kind { path: "a".to_string(), kind: PathKind::Missing },
@@ -460,13 +503,13 @@ echo \"two\"
             Input::Env { name: "HOME".to_string(), hash: Some(0) },
             Input::Env { name: "UNSET".to_string(), hash: None },
         ];
-        let file = serialize(0, &inputs, &encode_tree(&tree()));
-        assert_eq!(parse(&file).unwrap().inputs, inputs);
+        let unit = Unit { inputs, ..script_unit("x") };
+        assert_eq!(parse(&serialize(std::slice::from_ref(&unit))).unwrap(), [unit]);
     }
 
     #[test]
     fn the_file_is_one_yio_form() {
-        let file = serialize(0, &[input("yio.md")], &encode_tree(&tree()));
+        let file = serialize(&[tree_unit()]);
         let forms = reader::read(&file).unwrap();
         assert_eq!(forms.len(), 1);
         let FormKind::List(items) = &forms[0].kind else {
@@ -479,7 +522,7 @@ echo \"two\"
 
     #[test]
     fn damaged_files_are_rejected_without_panicking() {
-        let file = serialize(0, &[input("yio.md")], &encode_tree(&tree()));
+        let file = serialize(&[tree_unit(), script_unit("a")]);
         for length in 0..file.len() - 1 {
             assert!(parse(&file[..length]).is_err(), "prefix of {length} bytes");
         }
@@ -496,7 +539,7 @@ echo \"two\"
 
     #[test]
     fn other_versions_are_rejected() {
-        let file = serialize(0, &[], &encode_tree(&tree()));
+        let file = serialize(&[tree_unit()]);
         let start = PREFIX.len() + file[PREFIX.len()..].iter().position(|b| *b == b':').unwrap() + 1;
 
         let mut format = file.clone();
@@ -510,5 +553,69 @@ echo \"two\"
             parse(&version).err().unwrap(),
             "cache was written by a different yio version"
         );
+    }
+
+    #[test]
+    fn a_session_without_a_file_records_nothing() {
+        let session = Session::from_file(None, false);
+        assert!(!session.active());
+        assert_eq!(session.find(UnitKind::Tree, "yio.md"), None);
+        session.put(tree_unit());
+        assert_eq!(session.refreshed(), None);
+    }
+
+    #[test]
+    fn a_session_that_reuses_everything_leaves_the_file_alone() {
+        let file = serialize(&[tree_unit(), script_unit("a")]);
+        let session = Session::from_file(Some(&file), false);
+        assert!(session.active());
+        session.keep(session.find(UnitKind::Tree, "yio.md").unwrap());
+        session.keep(session.find(UnitKind::Script, "a").unwrap());
+        assert_eq!(session.refreshed(), None);
+        assert_eq!(session.contents(), file);
+        // Kind and source together identify a unit.
+        assert_eq!(session.find(UnitKind::Script, "yio.md"), None);
+    }
+
+    #[test]
+    fn a_session_rewrites_the_file_when_a_result_changes_or_goes_away() {
+        let file = serialize(&[tree_unit(), script_unit("a")]);
+
+        // A recomputed result.
+        let session = Session::from_file(Some(&file), false);
+        session.keep(session.find(UnitKind::Tree, "yio.md").unwrap());
+        let newer = Unit { body: vec![9], ..script_unit("a") };
+        session.put(newer.clone());
+        assert_eq!(parse(&session.refreshed().unwrap()).unwrap(), [tree_unit(), newer]);
+
+        // A plugin that no longer exists: its result is not carried over.
+        let session = Session::from_file(Some(&file), false);
+        session.keep(session.find(UnitKind::Tree, "yio.md").unwrap());
+        assert_eq!(parse(&session.refreshed().unwrap()).unwrap(), [tree_unit()]);
+    }
+
+    #[test]
+    fn an_unusable_file_is_replaced() {
+        let session = Session::from_file(Some(b"(cache #3:abc)"), false);
+        assert!(session.active());
+        assert_eq!(session.find(UnitKind::Tree, "yio.md"), None);
+        session.put(tree_unit());
+        assert_eq!(parse(&session.refreshed().unwrap()).unwrap(), [tree_unit()]);
+    }
+
+    #[test]
+    fn a_fresh_session_ignores_the_file_and_can_start_one() {
+        let file = serialize(&[tree_unit()]);
+        let session = Session::from_file(Some(&file), true);
+        assert_eq!(session.find(UnitKind::Tree, "yio.md"), None);
+        assert!(session.refreshed().is_some());
+
+        // `--cache` with no file yet: results are recorded, but nothing is
+        // written unless it is asked for through `contents`.
+        let session = Session::from_file(None, true);
+        assert!(session.active());
+        session.put(tree_unit());
+        assert_eq!(session.refreshed(), None);
+        assert_eq!(parse(&session.contents()).unwrap(), [tree_unit()]);
     }
 }

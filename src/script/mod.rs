@@ -1,6 +1,7 @@
 //! The `.yio` scripting language. See `docs/scripting-language.md`.
 
 pub mod builtins;
+pub mod encode;
 pub mod eval;
 pub mod reader;
 pub mod render;

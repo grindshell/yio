@@ -8,7 +8,7 @@ The file format is heavily inspired by [`mask`](https://github.com/jacobdeichert
 
 ## Status
 
-A Rust crate (edition 2024) with no dependencies. The CLI scaffold exists: it loads `yio.md` and the files it embeds, resolves commands, arguments, and flags, lists commands, runs scripts with bash, caches the command tree, and runs `.yio/` plugins written in bash or the scripting language. Caching of script results, file-writing built-ins, and `.yiorc` are design only. Check `docs/` and the code before assuming a feature exists.
+A Rust crate (edition 2024) with no dependencies. The CLI scaffold exists: it loads `yio.md` and the files it embeds, resolves commands, arguments, and flags, lists commands, runs scripts with bash, runs `.yio/` plugins written in bash or the scripting language, and caches both the command tree and the results of scripting-language plugins. File-writing built-ins and `.yiorc` are design only. Check `docs/` and the code before assuming a feature exists.
 
 | File | Role |
 | --- | --- |
@@ -17,7 +17,8 @@ A Rust crate (edition 2024) with no dependencies. The CLI scaffold exists: it lo
 | `src/cli.rs` | Command-line arguments to a resolved command and its values |
 | `src/help.rs` | Command listings |
 | `src/run.rs` | Runs a script with bash |
-| `src/cache.rs` | `.yio/cache.yio`: the file format |
+| `src/cache.rs` | `.yio/cache.yio`: the file format, and what one run keeps, replaces, and drops |
+| `src/bytes.rs` | The byte-level encoding used inside the cache file |
 | `src/input.rs` | What a cached result depended on, and whether it still holds |
 | `src/plugin.rs` | `.yio/pre/` and `.yio/post/` plugins: discovery, order, running |
 | `src/script/reader.rs` | `.yio` source bytes to forms |
@@ -25,9 +26,10 @@ A Rust crate (edition 2024) with no dependencies. The CLI scaffold exists: it lo
 | `src/script/value.rs` | Script values |
 | `src/script/builtins.rs` | Built-in functions, including the ones that read files and record inputs |
 | `src/script/render.rs` | A script's value as terminal text |
+| `src/script/encode.rs` | A script's value as bytes, for the cache |
 | `docs/cli-parsing.md` | The parsing and running rules the above implement |
 | `docs/embedding.md` | How one `yio.md` embeds another |
-| `docs/scripting-language.md` | Plan for the scripting language, cache, and plugins. Everything but script result caching and file-writing built-ins is implemented |
+| `docs/scripting-language.md` | Plan for the scripting language, cache, and plugins. Everything but file-writing built-ins is implemented |
 
 ## Repo rules
 
@@ -110,9 +112,9 @@ Present on every command; a `yio.md` may override them.
 
 - `yio` with no arguments, in a directory containing `yio.md`: parse the file and write the top-level commands and options to stdout. (This differs from `mask`.)
 - `yio --help` / `-h`: show a formatted description of the given command or subcommand instead of running it. With no command, and with no `yio.md`, it describes the CLI itself.
-- `yio --cache`: write the interpreted result to `.yio/cache.yio`, a cached AST of the commands, subcommands, and options, and exit.
+- `yio --cache`: write the interpreted result to `.yio/cache.yio`, a cached AST of the commands, subcommands, and options, along with the value of each scripting-language plugin, and exit.
 - `yio --remove-cache`: remove that cache and exit.
-- While the cache file exists it is used when its inputs are unchanged, and rewritten when they are not. A stale cache is never used.
+- While the cache file exists, each result in it is used when what it was computed from is unchanged, and recomputed and stored again when it is not. A stale result is never used. A scripting-language plugin with an unchanged result is not run at all; a bash plugin always runs.
 
 ### Cache format
 

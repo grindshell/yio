@@ -32,9 +32,6 @@ pub struct Outcome {
     pub value: Value,
     /// Everything outside the script that the value depends on. While these
     /// are unchanged, running the script again would give the same value.
-    // Only tests read this until script results are cached (phase 6 of
-    // docs/scripting-language.md). Remove this allowance then.
-    #[allow(dead_code)]
     pub inputs: Vec<Input>,
 }
 

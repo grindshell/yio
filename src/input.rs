@@ -143,6 +143,26 @@ pub fn env_var(name: &str, vars: Vars) -> (Option<String>, Input) {
     (value, Input::Env { name: name.to_string(), hash })
 }
 
+/// Drops inputs that another input already covers, so that checking them
+/// later costs less. A file whose contents were read cannot change size or
+/// stop being a file without its contents changing, so a `Size` or `Kind`
+/// input for the same path adds nothing.
+pub fn prune(inputs: &mut Vec<Input>) {
+    let read: Vec<String> = inputs
+        .iter()
+        .filter_map(|input| match input {
+            Input::File { path, .. } => Some(path.clone()),
+            _ => None,
+        })
+        .collect();
+    inputs.retain(|input| match input {
+        Input::Size { path, .. } | Input::Kind { path, kind: PathKind::File } => {
+            !read.contains(path)
+        }
+        _ => true,
+    });
+}
+
 /// Reads text files on behalf of the loader and remembers each one.
 #[derive(Default)]
 pub struct Recorder {
@@ -433,6 +453,39 @@ mod tests {
             let fresh = check(&[recorded], as_of, as_of + 100 * SECOND, &[]);
             assert_eq!(fresh, Freshness::Dirty, "round {round}");
         }
+    }
+
+    #[test]
+    fn pruning_drops_what_a_read_file_already_covers() {
+        let file = |path: &str| Input::File { path: path.to_string(), size: 1, mtime: 2, hash: 3 };
+        let size = |path: &str| Input::Size { path: path.to_string(), size: 1 };
+        let kind = |path: &str, kind| Input::Kind { path: path.to_string(), kind };
+        let dir = Input::Dir { path: "lore".to_string(), mtime: 1, hash: 2 };
+        let env = Input::Env { name: "a.md".to_string(), hash: None };
+        let mut inputs = vec![
+            dir.clone(),
+            size("a.md"),
+            kind("a.md", PathKind::File),
+            size("b.md"),
+            kind("b.md", PathKind::File),
+            kind("a.md", PathKind::Dir),
+            env.clone(),
+            file("a.md"),
+        ];
+        prune(&mut inputs);
+        assert_eq!(
+            inputs,
+            [
+                dir,
+                size("b.md"),
+                kind("b.md", PathKind::File),
+                // Kept: this one says the path was *not* a file at some
+                // point, which reading it later does not cover.
+                kind("a.md", PathKind::Dir),
+                env,
+                file("a.md"),
+            ]
+        );
     }
 
     #[test]
