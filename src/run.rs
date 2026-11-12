@@ -1,7 +1,17 @@
-//! Runs a command's scripts.
+//! Runs bash.
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command as Process, ExitCode};
+
+/// Something for bash to run.
+#[derive(Clone, Copy)]
+pub enum Script<'a> {
+    /// The text of a script.
+    Text(&'a str),
+    /// A script file, relative to the directory it runs in.
+    File(&'a str),
+}
 
 /// Runs each script in its own bash process, in order, adding `env` to the
 /// inherited environment. Nothing a script does to its shell carries over to
@@ -15,39 +25,53 @@ pub fn run(
     env: &[(&str, String)],
     dir: Option<&Path>,
 ) -> Result<ExitCode, String> {
-    let bash = bash();
     for script in scripts {
-        let mut process = Process::new(&bash);
-        pass_script(&mut process, &bash, script);
-        if let Some(dir) = dir {
-            process.current_dir(dir);
-        }
-        process.envs(env.iter().map(|(name, value)| (*name, value.as_str())));
-        #[cfg(windows)]
-        wsl::forward(&mut process, env);
-
-        let status = process
-            .status()
-            .map_err(|error| format!("could not run `{}`: {error}", bash.display()))?;
-        if !status.success() {
-            // No code means the script was killed by a signal.
-            let code = status.code().and_then(|code| u8::try_from(code).ok());
-            return Ok(ExitCode::from(code.unwrap_or(1)));
+        let code = run_one(Script::Text(script), env, dir)?;
+        if code != 0 {
+            return Ok(ExitCode::from(code));
         }
     }
     Ok(ExitCode::SUCCESS)
 }
 
+/// Runs one script and gives its exit code, which is zero on success.
+pub fn run_one(script: Script, env: &[(&str, String)], dir: Option<&Path>) -> Result<u8, String> {
+    let bash = bash();
+    let mut process = Process::new(&bash);
+    pass_script(&mut process, &bash, script);
+    if let Some(dir) = dir {
+        process.current_dir(dir);
+    }
+    process.envs(env.iter().map(|(name, value)| (*name, value.as_str())));
+    #[cfg(windows)]
+    wsl::forward(&mut process, env);
+
+    // Anything yio has printed so far must reach the terminal before the
+    // script's own output does.
+    let _ = std::io::stdout().flush();
+    let status = process
+        .status()
+        .map_err(|error| format!("could not run `{}`: {error}", bash.display()))?;
+    if status.success() {
+        return Ok(0);
+    }
+    // No code means the script was killed by a signal.
+    let code = status.code().and_then(|code| u8::try_from(code).ok());
+    Ok(code.filter(|code| *code != 0).unwrap_or(1))
+}
+
 /// Adds the arguments that make `bash` run `script`.
-fn pass_script(process: &mut Process, bash: &Path, script: &str) {
-    process.arg("-c");
+fn pass_script(process: &mut Process, bash: &Path, script: Script) {
     #[cfg(windows)]
     if wsl::is_launcher(bash) {
         wsl::pass_script(process, script);
         return;
     }
     let _ = bash;
-    process.arg(script);
+    match script {
+        Script::Text(text) => process.arg("-c").arg(text),
+        Script::File(file) => process.arg(file),
+    };
 }
 
 /// The bash to run: the first one on `PATH`.
@@ -77,6 +101,8 @@ mod wsl {
     use std::path::Path;
     use std::process::Command as Process;
 
+    use super::Script;
+
     /// The launcher is the only `bash.exe` that lives in the system
     /// directory.
     pub fn is_launcher(bash: &Path) -> bool {
@@ -92,10 +118,13 @@ mod wsl {
     /// passes the rest of its command line through a shell inside WSL, so a
     /// script given the usual way is expanded once there and again by the
     /// bash that runs it: `'$HOME'` arrives already expanded and `awk`'s
-    /// `$1` is gone. Writing the script as one single-quoted shell word
+    /// `$1` is gone. Writing each argument as one single-quoted shell word
     /// makes that first pass leave it alone.
-    pub fn pass_script(process: &mut Process, script: &str) {
-        process.raw_arg(quote(script));
+    pub fn pass_script(process: &mut Process, script: Script) {
+        match script {
+            Script::Text(text) => process.arg("-c").raw_arg(quote(text)),
+            Script::File(file) => process.raw_arg(quote(file)),
+        };
     }
 
     /// `text` as a single-quoted POSIX shell word.

@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use super::builtins;
-use crate::input::Input;
+use crate::input::{Input, Vars};
 use super::reader::{Error, Form, FormKind, Pos};
 use super::value::{Function, Value};
 
@@ -32,13 +32,17 @@ pub struct Outcome {
     pub value: Value,
     /// Everything outside the script that the value depends on. While these
     /// are unchanged, running the script again would give the same value.
+    // Only tests read this until script results are cached (phase 6 of
+    // docs/scripting-language.md). Remove this allowance then.
+    #[allow(dead_code)]
     pub inputs: Vec<Input>,
 }
 
 /// Evaluates the top-level forms of a script. Relative paths in the script
-/// are resolved against `base`.
-pub(super) fn run(forms: &[Form], base: &Path) -> Result<Outcome, Error> {
-    let mut interp = Interp { depth: 0, base: base.to_path_buf(), inputs: Vec::new() };
+/// are resolved against `base`, and `vars` are what `env` sees ahead of
+/// the real environment.
+pub(super) fn run(forms: &[Form], base: &Path, vars: Vars) -> Result<Outcome, Error> {
+    let mut interp = Interp { depth: 0, base: base.to_path_buf(), vars, inputs: Vec::new() };
     let scope = Rc::new(Scope::default());
     let value = match interp.block(forms, &scope) {
         Ok(value) | Err(Flow::Return(value)) => value,
@@ -116,13 +120,19 @@ fn error(pos: Pos, message: impl Into<String>) -> Error {
     Error { pos, message: message.into() }
 }
 
-pub struct Interp {
+pub struct Interp<'a> {
     depth: usize,
     base: PathBuf,
+    vars: Vars<'a>,
     inputs: Vec<Input>,
 }
 
-impl Interp {
+impl<'a> Interp<'a> {
+    /// The variables that stand ahead of the real environment.
+    pub fn vars(&self) -> Vars<'a> {
+        self.vars
+    }
+
     /// Where a path written in the script points, relative to the current
     /// directory. An empty path is the base directory itself.
     pub fn resolve(&self, path: &str) -> PathBuf {
@@ -395,14 +405,14 @@ mod tests {
 
     /// The value of a script, printed.
     fn value(source: &str) -> String {
-        match script::run(source.as_bytes(), Path::new(""), |outcome| outcome.value.to_string()) {
+        match script::run(source.as_bytes(), Path::new(""), &[], |outcome| outcome.value.to_string()) {
             Ok(value) => value,
             Err(error) => panic!("{source}\nfailed: {error}"),
         }
     }
 
     fn failure(source: &str) -> String {
-        match script::run(source.as_bytes(), Path::new(""), |outcome| outcome.value.to_string()) {
+        match script::run(source.as_bytes(), Path::new(""), &[], |outcome| outcome.value.to_string()) {
             Ok(value) => panic!("{source}\nshould fail but gave {value}"),
             Err(error) => error.to_string(),
         }

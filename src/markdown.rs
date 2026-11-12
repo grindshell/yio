@@ -16,8 +16,24 @@ pub const FILE_NAME: &str = "yio.md";
 /// loops that paths cannot reveal, such as a symlink to a parent directory.
 const MAX_DEPTH: usize = 32;
 
-/// Reads a file to embed. Paths are relative to the current directory.
-pub type Read<'r> = &'r dyn Fn(&Path) -> io::Result<String>;
+/// Why a file could not be provided.
+pub enum ReadError {
+    Io(io::Error),
+    /// Something that had to happen before the file was read failed, such as
+    /// a plugin. The message stands on its own.
+    Failed(String),
+}
+
+impl From<io::Error> for ReadError {
+    fn from(error: io::Error) -> Self {
+        ReadError::Io(error)
+    }
+}
+
+/// Provides the text of a `yio.md`. Paths are relative to the current
+/// directory. This is called exactly once for each file that is loaded,
+/// just before it is needed.
+pub type Read<'r> = &'r dyn Fn(&Path) -> Result<String, ReadError>;
 
 /// Loads the `yio.md` at `file`, whose contents are `source`, along with
 /// every file it embeds. Error messages name the file and 1-based line.
@@ -29,7 +45,7 @@ pub fn load(file: &Path, source: &str, read: Read) -> Result<Command, String> {
 /// Loads a single file with nothing available to embed.
 #[cfg(test)]
 pub fn parse(source: &str) -> Result<Command, String> {
-    let read = |_: &Path| Err(io::Error::from(io::ErrorKind::NotFound));
+    let read = |_: &Path| Err(ReadError::Io(io::Error::from(io::ErrorKind::NotFound)));
     load(Path::new(FILE_NAME), source, &read)
 }
 
@@ -225,8 +241,10 @@ impl<'a, 'c> Loader<'a, 'c> {
                 &format!("embeds are nested more than {MAX_DEPTH} files deep"),
             ));
         }
-        let source = (self.read)(&file)
-            .map_err(|error| err(line_no, &format!("could not read `{shown}`: {error}")))?;
+        let source = (self.read)(&file).map_err(|error| match error {
+            ReadError::Io(cause) => err(line_no, &format!("could not read `{shown}`: {cause}")),
+            ReadError::Failed(message) => Error::Embedded(message),
+        })?;
 
         self.open.push(file);
         let embedded = load_source(&source, self.open, self.read);
@@ -916,7 +934,7 @@ See [docs](docs/yio.md) for more.
             let found = files.iter().find(|(name, _)| *name == wanted);
             found
                 .map(|(_, source)| source.to_string())
-                .ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))
+                .ok_or_else(|| ReadError::Io(io::Error::from(io::ErrorKind::NotFound)))
         };
         load(Path::new(files[0].0), files[0].1, &read)
     }

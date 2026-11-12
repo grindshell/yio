@@ -8,7 +8,7 @@ The file format is heavily inspired by [`mask`](https://github.com/jacobdeichert
 
 ## Status
 
-A Rust crate (edition 2024) with no dependencies. The CLI scaffold exists: it loads `yio.md` and the files it embeds, resolves commands, arguments, and flags, lists commands, runs scripts with bash, and caches the command tree. `.yio/` plugins, the scripting language, and `.yiorc` are design only. Check `docs/` and the code before assuming a feature exists.
+A Rust crate (edition 2024) with no dependencies. The CLI scaffold exists: it loads `yio.md` and the files it embeds, resolves commands, arguments, and flags, lists commands, runs scripts with bash, caches the command tree, and runs `.yio/` plugins written in bash or the scripting language. Caching of script results, file-writing built-ins, and `.yiorc` are design only. Check `docs/` and the code before assuming a feature exists.
 
 | File | Role |
 | --- | --- |
@@ -19,13 +19,15 @@ A Rust crate (edition 2024) with no dependencies. The CLI scaffold exists: it lo
 | `src/run.rs` | Runs a script with bash |
 | `src/cache.rs` | `.yio/cache.yio`: the file format |
 | `src/input.rs` | What a cached result depended on, and whether it still holds |
+| `src/plugin.rs` | `.yio/pre/` and `.yio/post/` plugins: discovery, order, running |
 | `src/script/reader.rs` | `.yio` source bytes to forms |
 | `src/script/eval.rs` | Evaluates forms: keywords, scopes, functions |
 | `src/script/value.rs` | Script values |
 | `src/script/builtins.rs` | Built-in functions, including the ones that read files and record inputs |
+| `src/script/render.rs` | A script's value as terminal text |
 | `docs/cli-parsing.md` | The parsing and running rules the above implement |
 | `docs/embedding.md` | How one `yio.md` embeds another |
-| `docs/scripting-language.md` | Plan for the scripting language, cache, and plugins. The reader, evaluator, built-ins, and command tree cache are implemented; the CLI does not run scripts yet |
+| `docs/scripting-language.md` | Plan for the scripting language, cache, and plugins. Everything but script result caching and file-writing built-ins is implemented |
 
 ## Repo rules
 
@@ -133,6 +135,7 @@ Local to the current working directory, next to the `yio.md` it belongs to.
 - Plugin file names are `NUMBER_NAME.EXT`. `NUMBER` is parsed as a `u64` (so `0000_build_view` is 0) and `NAME` is used for logging.
 - The extension picks the runner: `.bash` for bash scripts, `.yio` for the yio scripting language (below).
 - Plugins run at cache time by default. A plugin that should not must opt out itself by checking `YIO_CACHE`.
+- `pre/` plugins run before the `yio.md` is read; `post/` plugins run once the command tree is ready, before anything is listed or run. An embedded directory's plugins run too. See "Plugins" in `docs/scripting-language.md`.
 
 ## Scripting language
 

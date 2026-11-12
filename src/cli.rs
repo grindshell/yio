@@ -35,24 +35,60 @@ impl Invocation<'_> {
     /// The environment variables to inject into the command's script. A
     /// command's own variables replace built-ins of the same name.
     pub fn env(&self) -> Vec<(&str, String)> {
-        let builtins = self.builtins;
-        let mut env: Vec<(&str, String)> = Builtin::ALL
-            .into_iter()
-            .map(|builtin| {
-                let value = match builtin {
-                    Builtin::Help => builtins.help.to_string(),
-                    Builtin::Verbose => builtins.verbose.to_string(),
-                    Builtin::Version => VERSION.to_string(),
-                    Builtin::Cache => builtins.cache.to_string(),
-                    Builtin::RemoveCache => builtins.remove_cache.to_string(),
-                };
-                (builtin.env_name(), value)
-            })
-            .filter(|(name, _)| !self.vars.iter().any(|(var, _)| var == name))
-            .collect();
+        let mut env: Vec<(&str, String)> = self.builtins.env();
+        env.retain(|(name, _)| !self.vars.iter().any(|(var, _)| var == name));
         env.extend(self.vars.iter().map(|(name, value)| (*name, value.clone())));
         env
     }
+}
+
+impl Builtins {
+    /// The `YIO_*` variables these flags stand for.
+    pub fn env(self) -> Vec<(&'static str, String)> {
+        let value = |builtin| match builtin {
+            Builtin::Help => self.help.to_string(),
+            Builtin::Verbose => self.verbose.to_string(),
+            Builtin::Version => VERSION.to_string(),
+            Builtin::Cache => self.cache.to_string(),
+            Builtin::RemoveCache => self.remove_cache.to_string(),
+        };
+        Builtin::ALL.into_iter().map(|builtin| (builtin.env_name(), value(builtin))).collect()
+    }
+
+    fn set(&mut self, builtin: Builtin, value: bool) {
+        *match builtin {
+            Builtin::Help => &mut self.help,
+            Builtin::Verbose => &mut self.verbose,
+            Builtin::Version => &mut self.version,
+            Builtin::Cache => &mut self.cache,
+            Builtin::RemoveCache => &mut self.remove_cache,
+        } = value;
+    }
+}
+
+/// Finds the built-in flags on a command line by their spelling alone,
+/// without knowing the commands.
+///
+/// Plugins run before `yio.md` is loaded, so what they are told about the
+/// run has to come from here. The proper parse happens later and can differ
+/// in one case: a command that defines a flag with a built-in's spelling.
+/// Then this still reports the built-in.
+pub fn scan(args: &[String]) -> Builtins {
+    let mut found = Builtins::default();
+    for arg in args.iter().take_while(|arg| *arg != "--") {
+        if let Some(body) = arg.strip_prefix("--") {
+            let (name, value) = body.split_once('=').unwrap_or((body, "true"));
+            if let Some(builtin) = Builtin::ALL.into_iter().find(|b| b.long() == name) {
+                found.set(builtin, value != "false");
+            }
+        } else if let Some(cluster) = arg.strip_prefix('-') {
+            let builtin = |c| Builtin::ALL.into_iter().find(|b| b.short() == Some(c));
+            if !cluster.is_empty() && cluster.chars().all(|c| builtin(c).is_some()) {
+                cluster.chars().filter_map(builtin).for_each(|b| found.set(b, true));
+            }
+        }
+    }
+    found
 }
 
 /// Parses `args` (without the program name) against the tree under `root`.
@@ -155,14 +191,7 @@ impl<'a, 'b> State<'a, 'b> {
     ) -> Result<(), String> {
         match target {
             Target::Builtin(builtin) => {
-                let slot = match builtin {
-                    Builtin::Help => &mut self.builtins.help,
-                    Builtin::Verbose => &mut self.builtins.verbose,
-                    Builtin::Version => &mut self.builtins.version,
-                    Builtin::Cache => &mut self.builtins.cache,
-                    Builtin::RemoveCache => &mut self.builtins.remove_cache,
-                };
-                *slot = boolean(label, inline)?;
+                self.builtins.set(builtin, boolean(label, inline)?);
             }
             Target::User(flag) => {
                 let value = match (flag.ty, inline) {
@@ -451,6 +480,22 @@ echo
                 ("YIO_REMOVE_CACHE", "false".to_string()),
             ]
         );
+    }
+
+    #[test]
+    fn scanning_finds_builtins_without_knowing_the_commands() {
+        let found = |line: &str| scan(&args(line));
+        assert_eq!(found(""), Builtins::default());
+        assert_eq!(found("build web -j 8"), Builtins::default());
+        assert_eq!(found("--cache"), Builtins { cache: true, ..Builtins::default() });
+        assert_eq!(found("docs build -V --help"), Builtins { help: true, verbose: true, ..Builtins::default() });
+        assert_eq!(found("-hV"), Builtins { help: true, verbose: true, ..Builtins::default() });
+        assert_eq!(found("--verbose=false -v"), Builtins { version: true, ..Builtins::default() });
+        assert_eq!(found("--remove-cache"), Builtins { remove_cache: true, ..Builtins::default() });
+        // A cluster with anything else in it is some command's own flags.
+        assert_eq!(found("-jV -x"), Builtins::default());
+        // Nothing after `--` is a flag.
+        assert_eq!(found("build -- --cache -V"), Builtins::default());
     }
 
     #[test]

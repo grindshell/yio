@@ -2,7 +2,7 @@
 
 A plan. It covers the `.yio` scripting language, the `.yio/cache.yio` file, and `.yio/pre/` and `.yio/post/` plugins, because the three share one file format and one notion of "dirty".
 
-**Status**: phases 1 to 4 are implemented. The reader is described under "Syntax", the evaluator under "Semantics", the built-ins and what they record under "Built-ins and tracking", and the cache file, its dirtiness check, and its lifecycle under "The cache", which holds the command tree only. Plugins and script result caching do not exist yet, so `yio` itself does not run scripts: outside tests, nothing calls the reader or the evaluator until phase 5.
+**Status**: phases 1 to 5 are implemented. The reader is described under "Syntax", the evaluator under "Semantics", the built-ins and what they record under "Built-ins and tracking", plugins under "Plugins", and the cache file, its dirtiness check, and its lifecycle under "The cache". The cache holds the command tree only: script results are not cached yet (phase 6), so every plugin runs on every access.
 
 Statements marked **Given** come from the project's design. Everything else is a proposal. The decisions that need an answer before the affected phase starts are collected at the end.
 
@@ -275,15 +275,64 @@ Writing files (`write-file`, `make-dir`, `copy`, `move`, `remove`) is a later ph
 
 **Given**: `.yio/pre/` scripts run before the sibling `yio.md` is processed and `.yio/post/` scripts after. Names are `NUMBER_NAME.bash` or `NUMBER_NAME.yio`; `NUMBER` is a `u64`. They run at cache time too unless they check `YIO_CACHE`.
 
-Proposed:
+Implemented in `src/plugin.rs`.
 
-- Order is by `NUMBER`, then by name. A file that does not match the pattern is an error, not skipped.
-- A `.bash` plugin runs through the existing runner, in the `yio.md`'s directory, with the `YIO_*` variables.
-- A `.yio` plugin is evaluated and its value rendered to stdout.
-- A failing plugin stops the run and names the plugin.
-- Plugins run for listing, `--help`, running a command, and `--cache`. They do not run for `--version`.
-- An embedded directory's plugins run when its `yio.md` is embedded.
-- Bash plugins are opaque, so they cannot be replayed: with a valid cache they still run every time, and only `.yio` plugins are skipped. This is the reason to write a plugin in the scripting language.
+### Which files are plugins
+
+Every file in `.yio/pre/` and `.yio/post/` must be named `NUMBER_NAME.bash` or `NUMBER_NAME.yio`. Anything else is an error, so a misnamed plugin is reported instead of silently never running. Names that start with a dot, such as `.gitkeep`, are left alone.
+
+They run in order of `NUMBER`, then by file name. `0002_a` and `2_b` have the same number.
+
+### When they run
+
+| Stage | Runs |
+| --- | --- |
+| `pre` | Before the `yio.md` beside it is read. With a cache, before the cached tree is checked, because a `pre` plugin may rewrite the files that tree was built from. |
+| `post` | Once the whole command tree is ready and before anything is listed or run. Directories go in the order their `yio.md` was reached, the starting directory first. |
+
+- A plugin runs at most once per `yio` run.
+- An embedded directory's plugins run when its `yio.md` is embedded: its `pre` plugins just before that file is read.
+- Plugins run for listing, `--help`, running a command, and `--cache`. They do not run when `--version` or `--remove-cache` is on the command line, since neither uses the `yio.md`.
+- A `pre` plugin may create or rewrite the `yio.md` it sits beside. It runs even when that file does not exist yet.
+- A failing plugin stops the run. The error names the plugin's file.
+- With `--verbose`, each plugin is announced on stderr by name before it runs.
+
+`post` running after loading rather than after the chosen command is a decision: it keeps plugins about the `yio.md`, and the command's exit code stays `yio`'s.
+
+### The two kinds
+
+| | `.bash` | `.yio` |
+| --- | --- | --- |
+| Run by | bash, as a script file | The evaluator |
+| Working directory | The directory of the `yio.md` | Relative paths resolve against the same directory |
+| Output | Whatever it prints | Its value, rendered (see below) |
+| Sees | The `YIO_*` variables in its environment | The same through `(env "YIO_CACHE")` and the like |
+| Fails when | It exits non-zero | It has an error, or its value contains a function |
+| With a valid cache | Runs every time | Runs every time for now; replayed from the cache in phase 6 |
+
+Bash plugins are opaque, so they can never be replayed. That is the reason to write a plugin in the scripting language.
+
+### What plugins are told
+
+Plugins run before the commands are known, so `YIO_HELP`, `YIO_VERBOSE`, `YIO_CACHE`, and `YIO_REMOVE_CACHE` come from the command line as written: a built-in flag counts if its spelling appears anywhere before `--`. This differs from the real parse in one case. If a command defines its own flag with a built-in's spelling, such as its own `--cache`, plugins are still told the built-in was given.
+
+A plugin that should not run during `yio --cache` checks `YIO_CACHE` itself and stops.
+
+### Rendering a value
+
+Implemented in `src/script/render.rs`.
+
+| Value | Rendered as |
+| --- | --- |
+| `()` | Nothing |
+| A string | The text, on its own line |
+| A table | A row of headers, a rule, then one row per cell, in columns padded to the widest entry |
+| A column | A table of that one column |
+| A list | Each item in turn, so a script can give a heading, a table, and a note |
+| An integer, boolean, or bytes | As a script would write it |
+| A function | An error |
+
+In a table cell, `()` is blank and line breaks become spaces. Columns of different lengths are padded with blanks. Widths count characters, so wide characters such as CJK can misalign.
 
 ## Phases
 
@@ -295,16 +344,14 @@ Each phase ends with tests and its doc updated. Caching starts producing a file 
 | 2 | Cache file and command tree (done) | Encode and decode the payload, fingerprints, the dirtiness check, `--cache`, `--remove-cache`, loading from a clean cache. `src/cache.rs`. |
 | 3 | Evaluator (done) | Values, scopes, the special forms, functions and closures, errors. No built-ins that touch the outside world. `src/script/eval.rs`. |
 | 4 | Built-ins and tracking (done) | The first set above, with input recording. `src/script/builtins.rs`. |
-| 5 | Plugins | Discovery, ordering, the bash and `.yio` runners, rendering values, embedded directories. `src/plugin.rs`. |
+| 5 | Plugins (done) | Discovery, ordering, the bash and `.yio` runners, rendering values, embedded directories. `src/plugin.rs`. |
 | 6 | Script result caching | Script result units in the cache, replay on clean runs. The docs-table example runs end to end and is skipped when nothing changed. |
 | 7 | Writes and tuning | Write built-ins with output tracking; benchmark with realistic plugin sets before optimizing the encoding further. |
 
 ## Decisions needed
 
-Decided: the bytes literal is `#<length>:<bytes>`; "compressed" means a compact encoding; a dirty cache refreshes itself; `set` reassignment is allowed; a script's output is its final value; scripts may read files anywhere.
+Decided: the bytes literal is `#<length>:<bytes>`; "compressed" means a compact encoding; a dirty cache refreshes itself; `set` reassignment is allowed; a script's output is its final value; scripts may read files anywhere; `.bash` plugins run on every access; `post/` runs after `yio.md` is loaded.
 
 | # | Question | Proposed | Blocks |
 | --- | --- | --- | --- |
-| 6 | With a valid cache, do `.bash` plugins still run on every access? | Yes | Phase 5 |
-| 7 | Does `post/` run after `yio.md` is loaded, or after the chosen command finishes? | After it is loaded | Phase 5 |
 | 8 | May scripts write outside the directory tree of their `yio.md`? | No, write only inside | Phase 7 |

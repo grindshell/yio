@@ -258,7 +258,7 @@ fn is_kind(
 /// `(env name)`: an environment variable, or `()` if it is not set.
 fn env(interp: &mut Interp, args: &[Value], pos: Pos) -> Result<Value, Error> {
     arity("env", args, 1, pos)?;
-    let (value, input) = input::env_var(string("env", &args[0], pos)?);
+    let (value, input) = input::env_var(string("env", &args[0], pos)?, interp.vars());
     interp.record(input);
     Ok(value.map_or_else(Value::nil, |value| Value::str(&value)))
 }
@@ -517,7 +517,7 @@ mod tests {
     }
 
     fn run(source: &str, base: &Path) -> Result<Ran, script::Error> {
-        script::run(source.as_bytes(), base, |outcome| Ran {
+        script::run(source.as_bytes(), base, &[], |outcome| Ran {
             value: outcome.value.to_string(),
             inputs: outcome.inputs,
         })
@@ -813,7 +813,7 @@ mod tests {
         let as_of = input::now();
         let outcome = run_in(&scratch, SKETCH);
         let later = as_of + 100 * SECOND;
-        let fresh = || input::check(&outcome.inputs, as_of, later);
+        let fresh = || input::check(&outcome.inputs, as_of, later, &[]);
         assert_ne!(fresh(), Freshness::Dirty);
 
         // A file the script read changes.
