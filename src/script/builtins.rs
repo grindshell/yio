@@ -61,6 +61,7 @@ static BUILTINS: &[Builtin] = &[
     Builtin { name: "contains", call: contains },
     Builtin { name: "replace", call: replace },
     Builtin { name: "str", call: concatenate },
+    Builtin { name: "int", call: int },
     // Lists.
     Builtin { name: "list", call: |_, args, _| Ok(Value::list(args.to_vec())) },
     Builtin { name: "is-empty", call: is_empty },
@@ -535,6 +536,22 @@ fn concatenate(_: &mut Interp, args: &[Value], _: Pos) -> Result<Value, Error> {
     Ok(Value::str(&text))
 }
 
+/// `(int text)`: the whole number a string holds, or `()` when it does not
+/// hold one. A number read out of a file arrives as text, and this is what
+/// lets a script add such numbers up.
+///
+/// Text that is not a number gives `()` instead of an error because files
+/// hold whatever was typed into them: a script can then say what a missing
+/// number counts as, `(or (int words) 0)`, without checking first.
+fn int(_: &mut Interp, args: &[Value], pos: Pos) -> Result<Value, Error> {
+    arity("int", args, 1, pos)?;
+    match &args[0] {
+        Value::Int(number) => Ok(Value::Int(*number)),
+        Value::Str(text) => Ok(text.trim().parse().map_or_else(|_| Value::nil(), Value::Int)),
+        other => Err(wrong("int", "a string or an integer", other, pos)),
+    }
+}
+
 /// Whether a list or a string has nothing in it.
 fn is_empty(_: &mut Interp, args: &[Value], pos: Pos) -> Result<Value, Error> {
     arity("is-empty", args, 1, pos)?;
@@ -724,6 +741,12 @@ mod tests {
         assert_eq!(value(r#"(replace "a-b-c" "-" "+")"#), r#""a+b+c""#);
         assert_eq!(value(r#"(str "n=" 3 " ok=" true " " () (list 1 "x"))"#), r#""n=3 ok=true (1 \"x\")""#);
         assert_eq!(value("(str)"), r#""""#);
+        assert_eq!(value(r#"(list (int "1800") (int " -7\n") (int "0") (int 12))"#), "(1800 -7 0 12)");
+        assert_eq!(value(r#"(list (int "9223372036854775807") (int "-9223372036854775808"))"#), "(9223372036854775807 -9223372036854775808)");
+        // Text that is not a whole number is no number, not an error.
+        assert_eq!(value(r#"(list (int "") (int "n/a") (int "1.5") (int "12 words") (int "1 2") (int "9223372036854775808"))"#), "(() () () () () ())");
+        assert_eq!(value(r#"(+ (or (int "n/a") 0) (int "300"))"#), "300");
+        assert_eq!(failure("(int true)"), "1:1: `int` needs a string or an integer, but was given a boolean");
         assert_eq!(value(r#"(list (len "caf\u00e9") (len "") (len (list 1 2 3)) (len ()) (len #4:abcd))"#.replace("\\u00e9", "\u{e9}").as_str()), "(4 0 3 0 4)");
         assert_eq!(value(r#"(list (is-empty "") (is-empty "a") (is-empty ()) (is-empty (list 1)))"#), "(true false true false)");
     }

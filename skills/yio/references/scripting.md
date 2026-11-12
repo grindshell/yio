@@ -134,11 +134,13 @@ A script evaluates to the value of its last top-level expression, or to what a t
 | `(contains text part)` | Whether the text has the part in it, or a list has the item |
 | `(replace text from to)` | The text with every occurrence replaced |
 | `(str value...)` | The values as text, run together |
+| `(int text)` | The whole number the text holds, or `()` if it does not hold one |
 
 - Matching is exact and case-sensitive. There are no regular expressions.
 - `join` takes strings only, so turn numbers into text with `str` first.
 - `lines` drops `\r\n` endings as well as `\n`.
-- **Text cannot be turned into a number**, and a string's characters cannot be reached one at a time. A number read out of a file stays a string: it can be shown and compared, not added. The integers a script can do arithmetic on come from `len`, `file-size`, and its own literals. When a plugin has to sum numbers written in files, say so to the user and use a bash plugin for that part.
+- **A number read out of a file is a string** until `int` turns it into one: `(+ 1 "1800")` is an error, `(+ 1 (int "1800"))` is not. `int` takes digits with an optional sign and ignores whitespace around them. Anything else (`""`, `"n/a"`, `"1.5"`) gives `()`, not an error, so say what a missing number counts as: `(or (int words) 0)`.
+- A string's characters cannot be reached one at a time, and there are no substrings by position. Take text apart with `split`, `replace`, and `starts-with`.
 
 ### Lists
 
@@ -264,7 +266,7 @@ So a heading, a table, and a note is `(list "Heading" (col ...) "Note")`, and a 
 (col (column "File" 0) (column "Bytes" 1))
 ```
 
-**A value from a `name: value` line.** This looks at every line of the file and keeps the last match, and what it gives is a string even when it reads `words: 1800`:
+**A value from a `name: value` line.** This looks at every line of the file and keeps the last match. What it gives is a string, so a number needs `int`: `(or (int (field file "words")) 0)`.
 
 ```lisp
 (fn field (file name)
@@ -296,5 +298,6 @@ So a heading, a table, and a note is `(list "Heading" (col ...) "Note")`, and a 
 - **Treating `"false"` as false.** `(env "YIO_HELP")` is a non-empty string, which is true. Compare it with `"true"`.
 - **Building a table by row.** `col` takes columns.
 - **Reaching for the clock, randomness, the network, or another program.** None exist here, on purpose: a result that depended on one could not be replayed from the cache. Write that plugin in bash.
-- **Sorting, regular expressions, case-insensitive matching, turning text into a number.** Not available. `list-dir` is already sorted by name.
+- **Adding up numbers read from files without `int`.** They are strings until converted.
+- **Sorting, regular expressions, case-insensitive matching.** Not available. `list-dir` is already sorted by name.
 - **Returning a function**, or a list with one in it, is an error.

@@ -170,10 +170,12 @@ These work on the text of a path. Nothing is looked up.
 | `(contains text part)` | Whether the text has the part in it, or a list has the item |
 | `(replace text from to)` | The text with every occurrence replaced |
 | `(str value...)` | The values as text, run together |
+| `(int text)` | The whole number the text holds, or `()` if it does not hold one |
 
 - `split` and `replace` need a separator or search text that is not empty.
 - `contains` also takes a list: `(contains (list 1 2) 2)`.
 - `str` uses strings as they are, adds nothing for `()`, and writes anything else the way a script would.
+- `int` is for numbers read out of files, which arrive as text: `(int "1800")` is `1800`. It takes digits with an optional sign, and ignores whitespace around them. Anything else, such as `""`, `"n/a"`, `"1.5"`, or a number too large to hold, gives `()` and not an error, so a script can say what a missing number counts as: `(or (int words) 0)`. Given an integer, it gives it back.
 - Matching is exact. Nothing here ignores case.
 
 ### Lists
