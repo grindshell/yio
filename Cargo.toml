@@ -2,8 +2,20 @@
 name = "yio"
 version = "0.1.0"
 edition = "2024"
+# `if let` chains need 1.88. An older toolchain then says so, instead of
+# failing on the syntax.
+rust-version = "1.88"
 description = "A task runner for bash, driven by a Markdown file"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/grindshell/yio"
 
 [dependencies]
+
+# What is released. These make the binary smaller to download: by about a
+# quarter on Linux (1167 KB to 850 KB) and 1% on Windows, where the symbols
+# are in a separate file anyway. It runs no faster, and takes about four
+# times as long to build, which only the release workflow pays.
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
