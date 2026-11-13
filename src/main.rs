@@ -12,11 +12,12 @@ mod script;
 #[cfg(test)]
 mod testing;
 
+use std::cell::RefCell;
 use std::io::ErrorKind;
 use std::path::Path;
 use std::process::ExitCode;
 
-use cache::{Session, Unit, UnitKind};
+use cache::{Mount, Session, Unit, UnitKind};
 use command::Command;
 use input::{Freshness, Input, Vars};
 use markdown::{FILE_NAME as FILE, ReadError};
@@ -192,8 +193,8 @@ fn tree(started: u64, plugins: &Plugins, session: &Session) -> Result<Option<Com
     }
 
     if let Some(unit) = session.find(UnitKind::Tree, FILE)
-        && let Ok(root) = cache::decode_tree(&unit.body)
-        && pre_plugins(&unit.inputs, unit.as_of, started, &root, plugins)?
+        && let Ok((root, mounts)) = cache::decode_tree(&unit.body)
+        && pre_plugins(&unit.inputs, unit.as_of, started, &mounts, plugins)?
     {
         // A plugin may have rewritten the files the cached tree was built
         // from, so it is checked only now that they have all run.
@@ -209,11 +210,19 @@ fn tree(started: u64, plugins: &Plugins, session: &Session) -> Result<Option<Com
         }
     }
 
-    // Load from the Markdown, recording what was read.
+    // Load from the Markdown, recording what was read, and where each file
+    // is embedded the first time it is reached.
     let recorder = input::Recorder::default();
+    let mounts: RefCell<Vec<Mount>> = RefCell::default();
     let root = load(&|path, mount| {
         plugins.before(dir_of(path), mount).map_err(ReadError::Failed)?;
-        Ok(recorder.read(path)?)
+        let text = recorder.read(path)?;
+        let file = input::spell(path);
+        let mut mounts = mounts.borrow_mut();
+        if !mounts.iter().any(|(known, _)| *known == file) {
+            mounts.push((file, mount.to_vec()));
+        }
+        Ok(text)
     })?;
     if let Some(root) = &root {
         session.put(Unit {
@@ -221,7 +230,7 @@ fn tree(started: u64, plugins: &Plugins, session: &Session) -> Result<Option<Com
             source: FILE.to_string(),
             as_of: started,
             inputs: recorder.into_inputs(),
-            body: cache::encode_tree(root),
+            body: cache::encode_tree(root, &mounts.into_inner()),
         });
     }
     Ok(root)
@@ -232,55 +241,34 @@ fn tree(started: u64, plugins: &Plugins, session: &Session) -> Result<Option<Com
 /// turns out to have changed, which leaves the rest to the loader.
 ///
 /// What a directory's plugins are told depends on where its `yio.md` is
-/// embedded, and that is only known from the cached tree. The tree says so
-/// reliably for a file as long as every file read before it is unchanged,
-/// since those are the ones that embed it. So each file is checked before
-/// the plugins of the next one run.
+/// embedded, and that is only known from what was stored with the cached
+/// tree. It is right for a file as long as every file read before it is
+/// unchanged, since those are the ones that embed it. So each file is
+/// checked before the plugins of the next one run.
 fn pre_plugins(
     inputs: &[Input],
     as_of: u64,
     started: u64,
-    root: &Command,
+    mounts: &[Mount],
     plugins: &Plugins,
 ) -> Result<bool, String> {
     for input in inputs {
         let Input::File { path, .. } = input else {
             continue;
         };
-        let dir = dir_of(Path::new(path));
-        // A file that brought no commands has nothing below it to name, so
-        // an empty list is what its plugins would be told either way.
-        let mount = mount_of(root, dir).unwrap_or_default();
-        plugins.before(dir, &mount)?;
+        // Every file that was read was stored with where it is embedded.
+        // One that is missing can only be from a damaged cache, which the
+        // loader then replaces.
+        let Some((_, mount)) = mounts.iter().find(|(file, _)| file == path) else {
+            return Ok(false);
+        };
+        plugins.before(dir_of(Path::new(path)), mount)?;
         let one = std::slice::from_ref(input);
         if input::check(one, as_of, started, Vars::default()) == Freshness::Dirty {
             return Ok(false);
         }
     }
     Ok(true)
-}
-
-/// The commands that the `yio.md` in `dir` is embedded under: the path to
-/// the first command that came from it. `None` if no command did.
-fn mount_of(root: &Command, dir: &Path) -> Option<Vec<String>> {
-    if dir.as_os_str().is_empty() {
-        return Some(Vec::new());
-    }
-    fn search<'a>(command: &'a Command, dir: &Path, path: &mut Vec<&'a str>) -> bool {
-        for subcommand in &command.subcommands {
-            if subcommand.dir.as_deref() == Some(dir) {
-                return true;
-            }
-            path.push(&subcommand.name);
-            if search(subcommand, dir, path) {
-                return true;
-            }
-            path.pop();
-        }
-        false
-    }
-    let mut path = Vec::new();
-    search(root, dir, &mut path).then(|| path.iter().map(|name| name.to_string()).collect())
 }
 
 /// Loads `yio.md` and the files it embeds. `None` when there is no `yio.md`.
@@ -368,33 +356,5 @@ mod tests {
             assert!(inside.is_none(), "{file} ends inside an example");
             assert!(examples > 0, "{file} has no example to check");
         }
-    }
-
-    #[test]
-    fn a_tree_says_where_each_directory_is_embedded() {
-        let files = [
-            ("yio.md", "[top](top/yio.md)\n\n## docs\n\n[docs](docs/yio.md)\n\n### part\n\n[one](one/yio.md#only)\n\n## empty\n\n[none](none/yio.md)\n"),
-            ("top/yio.md", "## t\n"),
-            ("docs/yio.md", "## api\n\n[api](api/yio.md)\n\n## guide\n"),
-            ("docs/api/yio.md", "## gen\n"),
-            ("one/yio.md", "## skipped\n\n## only\n"),
-            ("none/yio.md", "> Only help\n"),
-        ];
-        let read = |path: &Path, _: &[String]| {
-            let wanted = path.to_string_lossy().replace('\\', "/");
-            let found = files.iter().find(|(name, _)| *name == wanted);
-            Ok(found.expect("the file is listed").1.to_string())
-        };
-        let root = markdown::load(Path::new("yio.md"), files[0].1, &read).unwrap();
-        let mount = |dir: &str| mount_of(&root, Path::new(dir)).map(|names| names.join(" "));
-
-        assert_eq!(mount(""), Some(String::new()));
-        assert_eq!(mount("top"), Some(String::new()));
-        assert_eq!(mount("docs"), Some("docs".to_string()));
-        assert_eq!(mount("docs/api"), Some("docs api".to_string()));
-        assert_eq!(mount("one"), Some("docs part".to_string()));
-        // A file that brought no commands, and a directory that is not there.
-        assert_eq!(mount("none"), None);
-        assert_eq!(mount("elsewhere"), None);
     }
 }

@@ -146,6 +146,15 @@ fn read_lines(
         } else if text == "**FLAGS**" {
             loader.end_paragraph()?;
             i = loader.flags(line_no, &lines, i + 1)?;
+        } else if misspells_flags(text)
+            && lines[i + 1..].iter().find(|line| !line.trim().is_empty()).is_some_and(|line| bullet(line).is_some())
+        {
+            // Left alone, the list would become help text and its flags
+            // would be unknown when the command is run.
+            return Err(err(
+                line_no,
+                &format!("`{text}` is followed by a list but is not `**FLAGS**`, which is how the marker has to be written"),
+            ));
         } else {
             loader.paragraph_line(line_no, Text::Plain(text));
             i += 1;
@@ -558,6 +567,15 @@ fn rest_with_subcommand(parent: &Command, rest: &str, subcommand: &str) -> Strin
     )
 }
 
+/// Whether a line is the `**FLAGS**` marker written some other way: in
+/// another case, with a colon, or with underscores for the bold. The caller
+/// has already taken the marker itself.
+fn misspells_flags(text: &str) -> bool {
+    let bold = text.trim_end_matches(':');
+    let inner = ["**", "__"].into_iter().find_map(|mark| bold.strip_prefix(mark)?.strip_suffix(mark));
+    inner.is_some_and(|inner| inner.trim_end_matches(':').trim().eq_ignore_ascii_case("flags"))
+}
+
 /// A flag being read from a `**FLAGS**` list.
 struct FlagDraft {
     line_no: usize,
@@ -705,9 +723,15 @@ fn flag_names(value: &str) -> Result<(Option<char>, Option<String>), String> {
 /// `(REQUIRED)` and `[OPTIONAL]` arguments, or by `(REQUIRED)` arguments and
 /// one `[...REST]`.
 fn command_heading(title: &str) -> Result<Command, String> {
-    let mut tokens = title.split_whitespace();
+    // A heading may be written as code, whole or word by word, as the
+    // values of a flag's options may. The backticks are not part of it.
+    let title = match unquote(title) {
+        inner if !inner.contains('`') => inner,
+        _ => title,
+    };
+    let mut tokens = title.split_whitespace().map(unquote);
     let name = tokens.next().ok_or("heading has no command name")?;
-    if name.starts_with(['-', '(', '[']) {
+    if name.starts_with(['-', '(', '[']) || name.contains('`') {
         return Err(format!("`{name}` is not a valid command name"));
     }
     let mut params: Vec<Param> = Vec::new();
@@ -1041,6 +1065,44 @@ rm -rf out/
         }
         // A sibling after it is not a subcommand.
         assert!(parse("## a [...X]\n## b\n").is_ok());
+    }
+
+    #[test]
+    fn a_heading_may_be_written_as_code() {
+        let root = parse("## `build` (TARGET)\n## `test [...NAMES]`\n## `tag` `(FILE)` `[KIND]`\n## plain\n").unwrap();
+        let shown: Vec<String> =
+            root.subcommands.iter().map(|c| format!("{} {}", c.name, c.signature())).collect();
+        assert_eq!(shown, ["build (TARGET)", "test [...NAMES]", "tag (FILE) [KIND]", "plain "]);
+
+        // A backtick that is not one of a pair is not part of a name.
+        for source in ["## `build\n", "## bu`ild\n", "## `a b` c`\n"] {
+            let error = parse(source).unwrap_err();
+            assert!(error.contains("is not a valid command name"), "{source:?} gave {error:?}");
+        }
+        // The anchor is the one a renderer gives such a heading.
+        let root = load_files(&[
+            ("yio.md", "## docs\n\n[b](docs/yio.md#build-out)\n"),
+            ("docs/yio.md", "## `build` (OUT)\n"),
+        ])
+        .unwrap();
+        assert_eq!(names(&root.subcommands[0]), ["build"]);
+    }
+
+    #[test]
+    fn a_misspelt_flags_marker_is_an_error() {
+        for marker in ["**FLAGS:**", "**FLAGS**:", "**Flags**", "**flags**", "__FLAGS__", "** FLAGS **"] {
+            let source = format!("## a\n\n{marker}\n\n- X\n  - flags: -x\n");
+            let expected = format!(
+                "yio.md: line 3: `{marker}` is followed by a list but is not `**FLAGS**`, which is how the marker has to be written"
+            );
+            assert_eq!(parse(&source).unwrap_err(), expected);
+        }
+        // Without a list after it, or without the bold, it is only text.
+        for source in ["## a\n\n**Flags**\n\nNone yet.\n", "## a\n\nFlags:\n\n- `-x` is not one\n", "## a\n\n**Flags**\n"] {
+            let root = parse(source).unwrap();
+            assert!(root.subcommands[0].flags.is_empty(), "{source:?}");
+            assert!(root.subcommands[0].long_help.is_some(), "{source:?}");
+        }
     }
 
     #[test]

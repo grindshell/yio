@@ -93,7 +93,8 @@ That gives `yio build web prod -j 8 --release`, `yio build clean`, `yio test par
 
 Details that the loader enforces:
 
-- **Headings** are a command name followed only by argument tokens. Anything else in the heading is an error. Only `#`-style headings count.
+- **Headings** are a command name followed only by argument tokens. Anything else in the heading is an error. Only `#`-style headings count. Backticks around the heading, or around each word of it, are dropped: ``## `build` (TARGET)`` defines `build`.
+- **The flags marker is exactly `**FLAGS**`.** `**Flags**` or `**FLAGS:**` before a list is an error.
 - **Flags.** The item text is the variable name. `flags` is required and takes one short form, one long form, or both (`-j --jobs`). `type` is `string` (the default) or `boolean`. `default`, `required`, and `description` are optional. A boolean's default must be `true` or `false`. Flags belong to the command they are written under and are not inherited by subcommands.
 - **`required: true`** makes a flag one that has to be given: without it `yio` stops with "missing required flag" before any script runs. The usage line shows it and the flag list marks it `[required]`. It cannot be combined with a `default`. Being given is what counts, so `--yes=false` passes; a script that must not act on `false` still tests the value.
 - A `default` is shown in the help as `[default: 4]` automatically, so the description need not repeat it.
@@ -172,7 +173,8 @@ A command that must be confirmed has a required flag. `yio deploy staging` then 
 | "required argument ... cannot follow an optional one" | Order is `(REQUIRED)` then `[OPTIONAL]`. |
 | "`[...X]` cannot be used with the optional argument" | Make the optional one a flag. |
 | "takes `[...X]`, so it cannot have the subcommand" | A rest argument and subcommands exclude each other, embedded ones included. |
-| "missing required flag" | The flag is declared `required: true`. `--help` and `--version` work without it. |
+| "missing required flag" | The flag is declared `required: true`. `--help`, `--version`, `--cache`, and `--remove-cache` work without it. |
+| "is followed by a list but is not `**FLAGS**`" | The marker is misspelt. Write `**FLAGS**`, upper case, no colon. |
 | "flag `-r` belongs to `yio build`, not to its subcommand" | Flags are not inherited. Define the flag on the subcommand as well. |
 | "differs from ... only by case" | Names must be unique ignoring case, because Windows environment names are. |
 | A paragraph of help vanished and commands appeared | A paragraph that is only a link to a `yio.md` is an embed. Add words around the link to keep it as text. |

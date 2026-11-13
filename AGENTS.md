@@ -38,6 +38,7 @@ A Rust crate (edition 2024) with no dependencies. It loads `yio.md` and the file
 | `docs/cache.md` | What is cached, how staleness is detected, the file format, measurements |
 | `yio.md` | The project's own tasks (build, test, lint, check, run, release) and its working example. Embeds `docs/yio.md` |
 | `docs/yio.md`, `docs/.yio/pre/0000_api.yio` | `yio docs search WORDS`, answered by a plugin that draws `docs/scripting-api.md` as a table, and `yio docs links` |
+| `tests/cli.rs` | Runs the built binary in a scratch directory: what bash makes of a script, and what a cached run does |
 | `skills/yio/` | An agent skill for writing `yio.md` files and plugins: `SKILL.md`, and `references/` for plugins and the scripting language. Self-contained, because it is installed outside this repository |
 | `README.md` | The introduction for users |
 | `.github/workflows/ci.yml` | Builds, tests, and lints on Linux, macOS, and Windows for pushes and pull requests |
@@ -83,7 +84,7 @@ Set the new version in `Cargo.toml`, commit, then tag that commit `v` plus the v
 - **Positional arguments**: `(MY_ARGUMENT_NAME)` in the heading. Required.
 - **Optional arguments**: `[MY_ARGUMENT_NAME]` in the heading. The script decides whether the variable holds a value.
 - **The rest of the arguments**: `[...MY_LIST_NAME]` as the last argument in the heading takes every argument the others leave, from none to many, so that `yio docs search built-in functions` works. Only for a command with no optional arguments and no subcommands. The script gets a bash array named `MY_LIST_NAME`, not an environment variable.
-- **Named flags**: a paragraph containing `**FLAGS**`, immediately followed (newline optional) by a `-` delimited list. Each top-level item is one flag. Sub-items configure it with the keys `flags`, `type`, `default`, `required`, and `description`. Only `flags` is mandatory, the type defaults to string, and flags may have default values (unlike `mask`). A flag with `required: true` has to be given on the command line.
+- **Named flags**: a paragraph containing `**FLAGS**`, written exactly so, immediately followed (newline optional) by a `-` delimited list. Each top-level item is one flag. Sub-items configure it with the keys `flags`, `type`, `default`, `required`, and `description`. Only `flags` is mandatory, the type defaults to string, and flags may have default values (unlike `mask`). A flag with `required: true` has to be given on the command line.
 - **Embedding**: when a relative link to a file named `yio.md` is the only content of a heading's paragraph, that file is loaded in place as part of the same run and its commands nest under the heading. No second `yio` process is spawned. Embedded scripts run in their own file's directory. A link that ends in a heading's anchor (`docs/yio.md#search-terms`) embeds only that command. A file cannot embed itself, in whole or in part, directly or through other files. See `docs/embedding.md`.
 
 Arguments and flags are injected into the script's environment under the name exactly as written. There is no automatic case conversion. Because Windows environment names are case-insensitive, names within one command must be unique ignoring case.

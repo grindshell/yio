@@ -36,7 +36,7 @@ use crate::input::{Input, PathKind};
 pub const FILE: &str = ".yio/cache.yio";
 
 /// Bumped whenever the payload layout changes.
-const FORMAT: u8 = 7;
+const FORMAT: u8 = 8;
 const PREFIX: &[u8] = b"(cache #";
 
 /// How deeply commands may nest in a cache file. Real trees stay far below
@@ -338,9 +338,25 @@ fn take_input(reader: &mut Reader) -> Result<Input, String> {
     })
 }
 
-/// Encodes a command and everything under it, parents before children.
-pub fn encode_tree(root: &Command) -> Vec<u8> {
+/// Where one `yio.md` of a tree is embedded: its path, spelled as the
+/// tree's inputs spell it, and the commands it sits under, outermost first.
+///
+/// This is stored beside the tree because the tree cannot always say it: a
+/// file that brought only help text has no command to be found by.
+pub type Mount = (String, Vec<String>);
+
+/// Encodes where each file is embedded, then a command and everything
+/// under it, parents before children.
+pub fn encode_tree(root: &Command, mounts: &[Mount]) -> Vec<u8> {
     let mut out = Vec::new();
+    put_len(&mut out, mounts.len());
+    for (file, under) in mounts {
+        put_str(&mut out, file);
+        put_len(&mut out, under.len());
+        for name in under {
+            put_str(&mut out, name);
+        }
+    }
     put_command(&mut out, root);
     out
 }
@@ -385,13 +401,22 @@ fn put_command(out: &mut Vec<u8>, command: &Command) {
 }
 
 /// Decodes what `encode_tree` produced.
-pub fn decode_tree(body: &[u8]) -> Result<Command, String> {
+pub fn decode_tree(body: &[u8]) -> Result<(Command, Vec<Mount>), String> {
     let mut reader = Reader::new(body);
+    let mut mounts = Vec::new();
+    for _ in 0..reader.u32()? {
+        let file = reader.str()?.to_string();
+        let mut under = Vec::new();
+        for _ in 0..reader.u32()? {
+            under.push(reader.str()?.to_string());
+        }
+        mounts.push((file, under));
+    }
     let root = take_command(&mut reader, 0)?;
     if !reader.is_empty() {
         return Err("cache has data after the command tree".to_string());
     }
-    Ok(root)
+    Ok((root, mounts))
 }
 
 fn take_command(reader: &mut Reader, depth: usize) -> Result<Command, String> {
@@ -492,13 +517,20 @@ echo \"two\"
         Input::File { path: path.to_string(), size: 3, mtime: 42, hash: 7 }
     }
 
+    fn mounts() -> Vec<Mount> {
+        vec![
+            ("yio.md".to_string(), Vec::new()),
+            ("docs/yio.md".to_string(), vec!["docs".to_string(), "api".to_string()]),
+        ]
+    }
+
     fn tree_unit() -> Unit {
         Unit {
             kind: UnitKind::Tree,
             source: "yio.md".to_string(),
             as_of: 1234,
             inputs: vec![input("yio.md"), input("docs/yio.md")],
-            body: encode_tree(&tree()),
+            body: encode_tree(&tree(), &mounts()),
         }
     }
 
@@ -515,7 +547,9 @@ echo \"two\"
     #[test]
     fn a_tree_survives_a_round_trip() {
         let root = tree();
-        assert_eq!(decode_tree(&encode_tree(&root)).unwrap(), root);
+        assert_eq!(decode_tree(&encode_tree(&root, &mounts())).unwrap(), (root.clone(), mounts()));
+        // A tree of one file, embedded nowhere.
+        assert_eq!(decode_tree(&encode_tree(&root, &[])).unwrap(), (root, Vec::new()));
     }
 
     #[test]
@@ -562,7 +596,7 @@ echo \"two\"
         for length in 0..file.len() - 1 {
             assert!(parse(&file[..length]).is_err(), "prefix of {length} bytes");
         }
-        let body = encode_tree(&tree());
+        let body = encode_tree(&tree(), &mounts());
         for length in 0..body.len() {
             assert!(decode_tree(&body[..length]).is_err(), "prefix of {length} bytes");
         }

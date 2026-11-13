@@ -62,7 +62,7 @@ done
 
 ## Help
 
-`--help` / `-h` describes the resolved command instead of running it: its short help, usage, subcommands, and flags. Paragraph text is added with `--verbose`, for the command itself and for each listed subcommand. It takes precedence over `--version`. Neither runs the command, so both work without its required arguments and flags: `yio build --help`, `yio build --version`.
+`--help` / `-h` describes the resolved command instead of running it: its short help, usage, subcommands, and flags. Paragraph text is added with `--verbose`, for the command itself and for each listed subcommand. It takes precedence over `--version`. Neither runs the command, so both work without its required arguments and flags: `yio build --help`, `yio build --version`. The same goes for `--cache` and `--remove-cache`, which act on the cache in place of running the command.
 
 Usage is shown as one form per way of invoking the command, because a subcommand is only recognized before the first argument:
 
@@ -89,7 +89,9 @@ A command with no code block has nothing to run, so naming it prints the same de
 
 The bash that runs is the first one on `PATH`. On Windows `yio` searches `PATH` for `bash.exe` itself, because the standard library looks in the system directories first and would pick the WSL launcher in System32 over a bash that comes earlier on `PATH`.
 
-That launcher (`C:\Windows\System32\bash.exe`) does not pass its arguments to bash unchanged. It sends the rest of its command line through a shell inside WSL, so a script given as an ordinary `-c` argument is expanded twice: `echo '$HOME'` prints a path and `awk '{print $2}'` loses its `$2`. When the bash found is in the system directory, `yio` writes the script onto the command line itself as one single-quoted shell word, which that first shell leaves alone. Every other bash gets the script as a normal argument.
+That launcher (`C:\Windows\System32\bash.exe`) does not pass its arguments to bash unchanged. It sends the rest of its command line through a shell inside WSL, so a script given as an ordinary `-c` argument is expanded twice: `echo '$HOME'` prints a path and `awk '{print $2}'` loses its `$2`. When the bash found is in the system directory, `yio` writes the script onto the command line itself as one single-quoted shell word, which that first shell leaves alone.
+
+Every other bash on Windows, such as Git Bash, gets the script as one argument that is always in double quotes. Those are built on MSYS or Cygwin, which read the command line again when a Windows program starts them, and an argument without quotes ends at its first line break. The standard library quotes an argument only when it has a space or a tab in it, so a script with neither, such as two lines of `./build.sh` and `./test.sh`, would have run its first line only.
 
 Scripts run in the directory of the `yio.md` that defines them, which matters for embedded files (see [embedding.md](embedding.md)).
 
@@ -209,11 +211,11 @@ Implemented in `src/check.rs`.
 ## What the loader accepts
 
 - One optional H1, before any command. Its text is ignored; a blockquote and paragraphs under it describe the file as a whole.
-- A heading is one command name followed by `(ARG)` and `[ARG]` tokens, optionally ending with `[...ARGS]` when there is no `[ARG]`. Argument and flag names must be valid environment variable names.
+- A heading is one command name followed by `(ARG)` and `[ARG]` tokens, optionally ending with `[...ARGS]` when there is no `[ARG]`. Argument and flag names must be valid environment variable names. The heading may be written as code, whole or word by word: ``## `build` (TARGET)`` defines `build`, without the backticks.
 - Any number of code blocks per command, each with no language or `bash`. Any other language is an error, so that a `json` example is never run as a script.
 - A fence may be indented up to three spaces, and that indentation is removed from each line of the script, as Markdown does. Anything indented four or more spaces (or a tab) is literal text: it is never a script, heading, marker, or embed, and it lands in the verbose help with its indentation.
 - An HTML comment that starts a line (`<!--`) hides everything through the line containing `-->`, so a commented-out code block or heading is ignored. A comment that is never closed is an error.
-- `**FLAGS**` on its own line, then a list. Options are `flags` (required), `type` (`string` or `boolean`), `default`, `required` (`true` or `false`), and `description`. Values may be wrapped in backticks.
+- `**FLAGS**` on its own line, then a list. Options are `flags` (required), `type` (`string` or `boolean`), `default`, `required` (`true` or `false`), and `description`. Values may be wrapped in backticks. The marker is exactly that. A bold `flags` written any other way, such as `**Flags**` or `**FLAGS:**`, is an error when a list follows it, because the list would otherwise become help text and its flags would be unknown when the command runs.
 
 Errors name the file and line: `yio.md: line 12: flag `JOBS` is missing its `flags` option`.
 

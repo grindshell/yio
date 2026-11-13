@@ -49,7 +49,7 @@ The cache holds independent units. Each records the inputs it was computed from,
 
 | Unit | Computed from | Stored |
 | --- | --- | --- |
-| Command tree | `yio.md` and every file it embeds | The `Command` tree |
+| Command tree | `yio.md` and every file it embeds | The `Command` tree, and where each of those files is embedded |
 | Script result (one per `.yio` plugin) | The script's source and everything its built-ins looked at | The value the script evaluated to |
 
 A script's inputs always include its own file, so editing a plugin reruns it. An input that another already covers is dropped before storing: a file that was read needs no separate record of its size or of being a file.
@@ -122,7 +122,7 @@ so a cache file is `(cache #5120:` followed by 5120 bytes and `)`. The cache loa
 Payload, with all integers fixed-width little-endian (no varint branching) and strings as a `u32` length plus UTF-8 (`src/bytes.rs`):
 
 ```
-u8   format version (currently 7)
+u8   format version (currently 8)
 str  yio version
 u32  unit count
 unit:
@@ -137,7 +137,7 @@ unit:
 
 Each unit has its own as-of time, because units are recomputed on different runs. The body length lets a dirty unit be skipped without decoding it.
 
-A command tree body is the `Command` records in pre-order, decoded in one pass straight into the structs the CLI already uses. Each script is stored with the line of its `yio.md` it starts on, so that warnings about it can name the line. A script result body is a value as one tag byte plus payload (`src/script/encode.rs`). A value nested more than 256 levels deep is not stored, so its script simply runs every time.
+A command tree body starts with where each `yio.md` it was built from is embedded: the file's path and the commands it sits under. A cached run needs that to tell each directory's plugins the same words an uncached run does (see "What plugins are told" in [plugins.md](plugins.md)), and the tree alone cannot say it for a file that brought help text and no commands. Then come the `Command` records in pre-order, decoded in one pass straight into the structs the CLI already uses. Each script is stored with the line of its `yio.md` it starts on, so that warnings about it can name the line. A script result body is a value as one tag byte plus payload (`src/script/encode.rs`). A value nested more than 256 levels deep is not stored, so its script simply runs every time.
 
 The encoding is compact but not compressed. General-purpose compression (deflate and the like) would need a dependency or a hand-written codec and would make loading slower.
 

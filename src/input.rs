@@ -68,7 +68,7 @@ pub enum PathKind {
 }
 
 /// A path the way inputs spell it.
-fn spell(path: &Path) -> String {
+pub fn spell(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
 }
 

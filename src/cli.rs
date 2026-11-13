@@ -273,6 +273,10 @@ impl<'a, 'b> State<'a, 'b> {
         }
         let command = self.command;
         let path = self.display_path();
+        // These four do something else in place of running the command, so
+        // they should not need what running it requires.
+        let builtins = self.builtins;
+        let runs = !(builtins.help || builtins.version || builtins.cache || builtins.remove_cache);
 
         // Whatever the other arguments leave over belongs to `[...NAME]`.
         let rest = command.rest.as_deref().map(|name| {
@@ -293,9 +297,7 @@ impl<'a, 'b> State<'a, 'b> {
         for (i, param) in command.params.iter().enumerate() {
             let value = match self.positionals.get(i) {
                 Some(value) => value.to_string(),
-                // `--help` and `--version` do not run the command, so they
-                // should not require its arguments.
-                None if param.required && !self.builtins.help && !self.builtins.version => {
+                None if param.required && runs => {
                     return Err(format!(
                         "missing required argument `({})` for `{path}`",
                         param.name
@@ -308,7 +310,7 @@ impl<'a, 'b> State<'a, 'b> {
         for flag in &command.flags {
             let given = self.given.iter().find(|(f, _)| std::ptr::eq(*f, flag));
             // As with a required argument, not when the command will not run.
-            if given.is_none() && flag.required && !self.builtins.help && !self.builtins.version {
+            if given.is_none() && flag.required && runs {
                 return Err(format!("missing required flag `{}` for `{path}`", flag.label()));
             }
             let value = match (given, &flag.default, flag.ty) {
@@ -636,6 +638,11 @@ echo
         // Describing the command does not need them, as with its arguments.
         assert!(run("deploy --help").is_ok());
         assert!(run("deploy --version").is_ok());
+        // Nor does writing or removing the cache, wherever it is asked for.
+        assert!(run("deploy --cache").is_ok());
+        assert!(run("deploy --remove-cache").is_ok());
+        // A dry run resolves the command as a real run would.
+        assert_eq!(run("deploy --dry-run").unwrap_err(), "missing required argument `(TARGET)` for `yio deploy`");
     }
 
     #[test]

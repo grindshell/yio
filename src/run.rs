@@ -158,7 +158,17 @@ fn pass_script(process: &mut Process, bash: &Path, script: Script) {
     let _ = bash;
     match script {
         Script::Text(text) => {
-            process.arg("-c").arg(text);
+            process.arg("-c");
+            #[cfg(not(windows))]
+            process.arg(text);
+            // Quoted for the same reason as a plugin's arguments below. A
+            // script with no space in it would otherwise go unquoted, and
+            // be cut off at its first line break.
+            #[cfg(windows)]
+            {
+                use std::os::windows::process::CommandExt;
+                process.raw_arg(wsl::always_quoted(text));
+            }
         }
         Script::File(file, args) => {
             process.arg(file);
@@ -248,10 +258,11 @@ mod wsl {
     /// built on MSYS or Cygwin, which read the command line again when the
     /// program that started them is a Windows one: an argument that is not
     /// quoted has `*` expanded against the files in the directory, `'`
-    /// taken as the start of a quotation, and `@name` replaced with the
-    /// contents of a file. The standard library quotes an argument only
-    /// when it has a space in it, so the arguments a plugin is told, which
-    /// can be anything, are always quoted here.
+    /// taken as the start of a quotation, `@name` replaced with the
+    /// contents of a file, and a line break taken as the end of the
+    /// argument. The standard library quotes an argument only when it has
+    /// a space or a tab in it. So a script, and the arguments a plugin is
+    /// told, which can be anything, are always quoted here.
     pub fn always_quoted(arg: &str) -> String {
         let mut quoted = String::from('"');
         let mut backslashes = 0;
