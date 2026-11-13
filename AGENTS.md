@@ -39,7 +39,7 @@ A Rust crate (edition 2024) with no dependencies. It loads `yio.md` and the file
 | `docs/cache.md` | What is cached, how staleness is detected, the file format, measurements |
 | `yio.md` | The project's own tasks (build, test, lint, check, run, release) and its working example. Embeds `docs/yio.md` |
 | `docs/yio.md`, `docs/.yio/pre/0000_api.yio` | `yio docs search WORDS`, answered by a plugin that draws `docs/scripting-api.md` as a table, and `yio docs links` |
-| `tests/cli.rs` | Runs the built binary in a scratch directory: what bash makes of a script, and what a cached run does |
+| `tests/cli.rs` | Runs the built binary in a scratch directory: what bash makes of a script and its values, what a cached run does, what is printed and exited with |
 | `skills/yio/` | An agent skill for writing `yio.md` files and plugins: `SKILL.md`, and `references/` for plugins and the scripting language. Self-contained, because it is installed outside this repository |
 | `README.md` | The introduction for users |
 | `.github/workflows/ci.yml` | Builds, tests, and lints on Linux, macOS, and Windows for pushes and pull requests |

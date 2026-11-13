@@ -6,6 +6,7 @@
 use std::fs;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use std::sync::OnceLock;
 
 /// A directory under the system's temporary directory that is removed when
 /// the test ends. Names must be unique across tests, which run in parallel.
@@ -33,10 +34,16 @@ impl Scratch {
         fs::write(path, text).unwrap();
     }
 
-    /// Runs `yio` in this directory with `line` as its arguments.
+    /// Runs `yio` in this directory with the words of `line` as its
+    /// arguments.
     fn yio(&self, line: &str) -> Ran {
+        self.yio_with(&line.split_whitespace().collect::<Vec<_>>())
+    }
+
+    /// Runs `yio` in this directory with exactly these arguments.
+    fn yio_with(&self, args: &[&str]) -> Ran {
         let output = Command::new(env!("CARGO_BIN_EXE_yio"))
-            .args(line.split_whitespace())
+            .args(args)
             .current_dir(&self.0)
             // Output is not a terminal here, so nothing is styled unless
             // the environment of the test run forces it.
@@ -57,27 +64,140 @@ impl Drop for Scratch {
     }
 }
 
+/// Whether there is a bash that works, which the tests that run a script
+/// need. Where there is none, such as a Windows machine whose only bash is
+/// a WSL launcher with nothing installed behind it, there is nothing for
+/// them to learn, and they say so and pass.
+fn bash_works() -> bool {
+    static WORKS: OnceLock<bool> = OnceLock::new();
+    *WORKS.get_or_init(|| {
+        let scratch = Scratch::new("probe");
+        scratch.write("yio.md", "## probe\n\n```\nexit 7\n```\n");
+        let probe = scratch.yio("probe");
+        if probe.code != 7 {
+            eprintln!("no usable bash, so the tests that run scripts are skipped ({probe:?})");
+        }
+        probe.code == 7
+    })
+}
+
 #[test]
 fn every_line_of_a_script_runs() {
+    if !bash_works() {
+        return;
+    }
     let scratch = Scratch::new("lines");
     scratch.write(
         "yio.md",
-        "## probe\n\n```\nexit 7\n```\n\n## lines\n\n```\ntrue\nfalse\n```\n\n## words\n\n```\necho one\necho two\n```\n",
+        "## lines\n\n```\ntrue\nfalse\n```\n\n## words\n\n```\necho one\necho two\n```\n\n## code\n\n```\nexit 7\n```\n\n```\necho not reached\n```\n",
     );
-    // The rest needs a bash that works. Where there is none, such as a
-    // Windows machine whose only bash is a WSL launcher with nothing
-    // installed behind it, there is nothing to learn.
-    let probe = scratch.yio("probe");
-    if probe.code != 7 {
-        eprintln!("skipped: no usable bash ({probe:?})");
-        return;
-    }
 
     // No line of this script has a space in it. On Windows such a script
     // used to reach Git Bash unquoted, which ran its first line only.
     assert_eq!(scratch.yio("lines").code, 1);
     let words = scratch.yio("words");
     assert_eq!((words.stdout.as_str(), words.code), ("one\ntwo\n", 0));
+    // The first block that fails stops the rest, and its code is yio's.
+    let code = scratch.yio("code");
+    assert_eq!((code.stdout.as_str(), code.code), ("", 7));
+}
+
+#[test]
+fn values_reach_a_script_exactly_as_typed() {
+    if !bash_works() {
+        return;
+    }
+    let scratch = Scratch::new("values");
+    scratch.write(
+        "yio.md",
+        "## show (TARGET) [...REST]\n\n**FLAGS**\n- NOTE\n  - flags: --note\n- LOUD\n  - flags: --loud\n  - type: boolean\n\n\
+         ```\nprintf '<%s>\\n' \"$TARGET\" \"$NOTE\" \"$LOUD\" \"$YIO_VERSION\" \"$YIO_DRY_RUN\" \"${#REST[@]}\" \"${REST[@]}\"\n```\n",
+    );
+    // Everything a shell would expand, split, or take for a quote.
+    let ran = scratch.yio_with(&["show", "it's $HOME *", "--note", "a \"b\" \\ c", "--", "-x", "two words", "", "`id`"]);
+    let version = env!("CARGO_PKG_VERSION");
+    let expected = format!(
+        "<it's $HOME *>\n<a \"b\" \\ c>\n<false>\n<{version}>\n<false>\n<4>\n<-x>\n<two words>\n<>\n<`id`>\n"
+    );
+    assert_eq!((ran.stdout.as_str(), ran.code), (expected.as_str(), 0), "{ran:?}");
+}
+
+#[test]
+fn a_script_runs_in_the_directory_of_its_yio_md() {
+    if !bash_works() {
+        return;
+    }
+    let scratch = Scratch::new("where");
+    scratch.write("yio.md", "## here\n\n```\nbasename \"$PWD\"\n```\n\n## docs\n\n[docs](docs/yio.md)\n");
+    scratch.write("docs/yio.md", "## there\n\n```\nbasename \"$PWD\"\n```\n");
+    let top = scratch.0.file_name().unwrap().to_string_lossy().into_owned();
+    assert_eq!(scratch.yio("here").stdout, format!("{top}\n"));
+    assert_eq!(scratch.yio("docs there").stdout, "docs\n");
+}
+
+#[test]
+fn a_bash_plugin_is_told_the_flags_and_the_words() {
+    if !bash_works() {
+        return;
+    }
+    let scratch = Scratch::new("bash-plugin");
+    scratch.write("yio.md", "## one [...WORDS]\n\n```\n# Nothing to do.\n```\n");
+    scratch.write(".yio/pre/1_told.bash", "printf '%s|' \"$YIO_VERBOSE\" \"$YIO_DRY_RUN\" \"$#\" \"$@\"\necho\n");
+    scratch.write(".yio/post/1_fails.bash", "[ \"$1\" != fail ] || exit 3\n");
+
+    let ran = scratch.yio_with(&["-V", "one", "two words", "*", "it's", "--dry-run"]);
+    assert_eq!(ran.stdout.lines().next(), Some("true|true|4|one|two words|*|it's|"), "{ran:?}");
+    assert_eq!(ran.code, 0, "{ran:?}");
+    // Each plugin is announced on stderr when asked to be verbose.
+    assert!(ran.stderr.contains("yio: pre plugin told (.yio/pre/1_told.bash)\n"), "{ran:?}");
+
+    // A plugin that fails stops the run and is named.
+    let ran = scratch.yio("fail");
+    assert_eq!(ran.stderr, "yio: plugin `.yio/post/1_fails.bash` failed with exit code 3\n");
+    assert_eq!(ran.code, 2);
+}
+
+#[test]
+fn a_dry_run_shows_the_command_and_runs_nothing() {
+    let scratch = Scratch::new("dry");
+    scratch.write(
+        "yio.md",
+        "## make (NAME)\n\n> Makes a file\n\n**FLAGS**\n- MODE\n  - flags: --mode\n  - default: 644\n\n```\ntouch \"$NAME\"\nchmod \"$MODE\" \"$NAME\"\n```\n",
+    );
+    let ran = scratch.yio("make marker --dry-run");
+    let expected = "# Dry run of `yio make`: nothing below has been run.\nNAME='marker'\nMODE='644'\n\n\
+                    # yio.md, line 11\ntouch \"$NAME\"\nchmod \"$MODE\" \"$NAME\"\n";
+    assert_eq!((ran.stdout.as_str(), ran.stderr.as_str(), ran.code), (expected, "", 0));
+    assert!(!scratch.0.join("marker").exists());
+
+    // What a real run would refuse, a dry run refuses.
+    let ran = scratch.yio("make --dry-run");
+    assert_eq!((ran.stderr.as_str(), ran.code), ("yio: missing required argument `(NAME)` for `yio make`\n", 2));
+    // A name that is nearly right is pointed out.
+    let ran = scratch.yio("mak marker");
+    assert_eq!((ran.stderr.as_str(), ran.code), ("yio: unknown command `mak` for `yio`; did you mean `make`?\n", 2));
+    let ran = scratch.yio("make marker --mod 600");
+    assert_eq!(ran.stderr, "yio: unknown flag `--mod` for `yio make`; did you mean `--mode`?\n");
+}
+
+#[test]
+fn a_directory_without_a_yio_md_still_describes_the_cli() {
+    let scratch = Scratch::new("empty");
+    for line in ["", "build", "--cache"] {
+        let ran = scratch.yio(line);
+        assert_eq!(
+            (ran.stdout.as_str(), ran.stderr.as_str(), ran.code),
+            ("", "yio: no yio.md in the current directory\n", 2),
+            "`yio {line}`"
+        );
+    }
+    let help = scratch.yio("--help");
+    assert!(help.stdout.starts_with("Y I Oughta: a task runner for bash."), "{help:?}");
+    assert!(help.stdout.contains("\nUsage: yio [flags]\n"), "{help:?}");
+    assert_eq!(help.code, 0);
+    assert_eq!(scratch.yio("--version").stdout, format!("yio {}\n", env!("CARGO_PKG_VERSION")));
+    // Nothing was left behind.
+    assert_eq!(fs::read_dir(&scratch.0).unwrap().count(), 0);
 }
 
 #[test]
