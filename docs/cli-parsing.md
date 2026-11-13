@@ -97,6 +97,10 @@ Scripts run in the directory of the `yio.md` that defines them, which matters fo
 
 Each code block of a command runs as its own `bash -c` process, in the order written. They share the injected variables and nothing else: shell variables, options, and the working directory set by one block do not reach the next. The first block that exits non-zero stops the run, and its exit code becomes `yio`'s.
 
+On Linux and macOS the last block that has anything to do is not started as a child: it takes over the `yio` process. The script is then the program the calling shell waits for, so its exit code, or the signal that ended it, arrives untranslated. It also settles Ctrl-C, which goes to everything the terminal is running: `yio` used to end at once and return the prompt while the script was still cleaning up. A block before the last is still a child, and one that a signal ends is reported as a shell reports it, 128 plus the signal, so 130 for Ctrl-C. Windows cannot replace a process, so there every block is a child.
+
+What `yio` prints itself (a listing, what a plugin drew, a dry run) is dropped without complaint when nothing is reading standard output any more, as in `yio | head -n 3`. The run carries on, so a command still runs.
+
 Bash is not started for a code block that gives it nothing to do: one whose every line is blank or a comment. That is the block of a command a plugin answers (see "An example" in [plugins.md](plugins.md)), and starting bash would be most of what such a command costs.
 
 ## Dry run

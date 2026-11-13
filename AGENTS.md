@@ -18,6 +18,7 @@ A Rust crate (edition 2024) with no dependencies. It loads `yio.md` and the file
 | `src/cli.rs` | Command-line arguments to a resolved command and its values |
 | `src/help.rs` | Command listings |
 | `src/run.rs` | Runs a script with bash |
+| `src/output.rs` | Writes `yio`'s own text to standard output, and carries on when nothing reads it |
 | `src/check.rs` | Warns about boolean variables a script uses in a way that cannot work |
 | `src/cache.rs` | `.yio/cache.yio`: the file format, and what one run keeps, replaces, and drops |
 | `src/bytes.rs` | The byte-level encoding used inside the cache file |

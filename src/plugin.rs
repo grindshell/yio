@@ -224,7 +224,7 @@ impl<'a> Plugins<'a> {
                 Some(text) => text,
                 None => self.execute(dir, stage, &plugin, source, args)?,
             };
-            print!("{text}");
+            crate::output::print(&text)?;
         }
         Ok(())
     }

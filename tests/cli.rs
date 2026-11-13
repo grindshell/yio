@@ -5,7 +5,7 @@
 
 use std::fs;
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 /// A directory under the system's temporary directory that is removed when
 /// the test ends. Names must be unique across tests, which run in parallel.
@@ -78,6 +78,68 @@ fn every_line_of_a_script_runs() {
     assert_eq!(scratch.yio("lines").code, 1);
     let words = scratch.yio("words");
     assert_eq!((words.stdout.as_str(), words.code), ("one\ntwo\n", 0));
+}
+
+#[test]
+fn a_reader_that_stops_reading_is_not_a_failure() {
+    let scratch = Scratch::new("closed");
+    scratch.write("yio.md", "## one\n\n> First\n\n```\n# Nothing to do.\n```\n");
+    scratch.write(".yio/pre/1_table.yio", r#"(col (col-def "Name" (list "a" "b")))"#);
+    // As `yio | head` does once `head` has what it wants: nothing is
+    // reading standard output by the time `yio` writes to it.
+    for line in ["", "--help", "one", "one --dry-run", "--version"] {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_yio"))
+            .args(line.split_whitespace())
+            .current_dir(&scratch.0)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        drop(child.stdout.take());
+        let output = child.wait_with_output().unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!((stderr.as_ref(), output.status.code()), ("", Some(0)), "`yio {line}`");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn the_last_script_takes_over_the_process() {
+    use std::os::unix::process::ExitStatusExt;
+
+    let scratch = Scratch::new("exec");
+    scratch.write(
+        "yio.md",
+        "## pids\n\n```\necho \"first $$\"\n```\n\n```\necho \"last $$\"\n```\n\n```\n# Nothing to do.\n```\n\n\
+         ## stopped\n\n```\nkill -TERM $$\n```\n\n\
+         ## stopped-early\n\n```\nkill -TERM $$\n```\n\n```\necho not reached\n```\n",
+    );
+    let yio = |line: &str| {
+        let child = Command::new(env!("CARGO_BIN_EXE_yio"))
+            .arg(line)
+            .current_dir(&scratch.0)
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        let output = child.wait_with_output().unwrap();
+        (pid, String::from_utf8_lossy(&output.stdout).into_owned(), output.status)
+    };
+
+    // The last block with anything to do runs as the process `yio` was.
+    // The ones before it are children.
+    let (pid, stdout, status) = yio("pids");
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(lines.len(), 2, "{stdout}");
+    assert_ne!(lines[0], format!("first {pid}"));
+    assert_eq!(lines[1], format!("last {pid}"));
+    assert!(status.success());
+
+    // So a signal that ends it is what the caller sees, as from bash.
+    assert_eq!(yio("stopped").2.signal(), Some(15));
+    // An earlier block is reported as a shell would, and stops the rest.
+    let (_, stdout, status) = yio("stopped-early");
+    assert_eq!((stdout.as_str(), status.code()), ("", Some(143)));
 }
 
 #[test]

@@ -16,7 +16,7 @@ A paragraph that is nothing but a relative link to a file named `yio.md` is an e
 
 - The link text is ignored.
 - The target is relative to the file that contains the link, not to the directory `yio` was started in. `..` is allowed.
-- The file name must be exactly `yio.md`. A lone link to anything else (`[readme](README.md)`), an absolute path, or a URL is ordinary help text, as is a link with other text around it.
+- The file name must be exactly `yio.md`. A lone link to anything else (`[readme](README.md)`), an absolute path, or a URL is ordinary help text, as is a link with other text around it. A path is absolute going by how it is written, on every platform: one that starts with `/` or `\`, or with a drive such as `C:`.
 - The link may name one section of the file. See "Embedding one command" below.
 
 ## What gets embedded

@@ -6,6 +6,7 @@ mod command;
 mod help;
 mod input;
 mod markdown;
+mod output;
 mod plugin;
 mod run;
 mod script;
@@ -93,7 +94,7 @@ fn run() -> Result<ExitCode, String> {
 
     let command = invocation.command;
     let describe = || {
-        print!("{}", help::render(&invocation.path, command, builtins.verbose));
+        output::print(&help::render(&invocation.path, command, builtins.verbose))?;
         Ok(ExitCode::SUCCESS)
     };
 
@@ -111,7 +112,7 @@ fn run() -> Result<ExitCode, String> {
         warn_all(&root);
         cache::write(&session.contents())
             .map_err(|error| format!("could not write {}: {error}", cache::FILE))?;
-        println!("wrote {}", cache::FILE);
+        output::print(&format!("wrote {}\n", cache::FILE))?;
         return Ok(ExitCode::SUCCESS);
     }
     if builtins.remove_cache {
@@ -130,7 +131,7 @@ fn run() -> Result<ExitCode, String> {
             let title = std::iter::once("yio").chain(invocation.path.iter().copied());
             let title = title.collect::<Vec<_>>().join(" ");
             let file = file_of(command);
-            print!("{}", run::plan(&title, &file, &command.scripts, &command.lines, &invocation.vars, list));
+            output::print(&run::plan(&title, &file, &command.scripts, &command.lines, &invocation.vars, list))?;
             return Ok(ExitCode::SUCCESS);
         }
         run::run(&command.scripts, &invocation.env(), list, command.dir.as_deref())
@@ -160,18 +161,15 @@ fn warn_all(command: &Command) {
 }
 
 fn version() -> Result<ExitCode, String> {
-    println!("yio {}", cli::VERSION);
+    output::print(&format!("yio {}\n", cli::VERSION))?;
     Ok(ExitCode::SUCCESS)
 }
 
 fn remove_cache() -> Result<ExitCode, String> {
     let removed =
         cache::remove().map_err(|error| format!("could not remove {}: {error}", cache::FILE))?;
-    if removed {
-        println!("removed {}", cache::FILE);
-    } else {
-        println!("no {} to remove", cache::FILE);
-    }
+    let said = if removed { format!("removed {}\n", cache::FILE) } else { format!("no {} to remove\n", cache::FILE) };
+    output::print(&said)?;
     Ok(ExitCode::SUCCESS)
 }
 

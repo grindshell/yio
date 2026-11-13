@@ -32,7 +32,9 @@ pub fn run(
     dir: Option<&Path>,
 ) -> Result<ExitCode, String> {
     let array = list.map(|(name, values)| array(name, values));
-    for script in scripts {
+    // The last script that gives bash anything to do.
+    let last = scripts.iter().rposition(|script| !is_idle(script));
+    for (i, script) in scripts.iter().enumerate() {
         if is_idle(script) {
             continue;
         }
@@ -42,7 +44,8 @@ pub fn run(
             Some(array) => Cow::Owned(format!("{array}; {script}")),
             None => Cow::Borrowed(script.as_str()),
         };
-        let code = run_one(Script::Text(&script), env, dir)?;
+        let script = Script::Text(&script);
+        let code = if Some(i) == last { run_last(script, env, dir)? } else { run_one(script, env, dir)? };
         if code != 0 {
             return Ok(ExitCode::from(code));
         }
@@ -122,8 +125,9 @@ pub fn quote(text: &str) -> String {
     quoted
 }
 
-/// Runs one script and gives its exit code, which is zero on success.
-pub fn run_one(script: Script, env: &[(&str, String)], dir: Option<&Path>) -> Result<u8, String> {
+/// The bash process that would run `script`, ready to start, and the bash
+/// it is.
+fn command(script: Script, env: &[(&str, String)], dir: Option<&Path>) -> (Process, PathBuf) {
     let bash = bash();
     let mut process = Process::new(&bash);
     pass_script(&mut process, &bash, script);
@@ -137,15 +141,51 @@ pub fn run_one(script: Script, env: &[(&str, String)], dir: Option<&Path>) -> Re
     // Anything yio has printed so far must reach the terminal before the
     // script's own output does.
     let _ = std::io::stdout().flush();
-    let status = process
-        .status()
-        .map_err(|error| format!("could not run `{}`: {error}", bash.display()))?;
+    (process, bash)
+}
+
+fn not_started(bash: &Path, error: std::io::Error) -> String {
+    format!("could not run `{}`: {error}", bash.display())
+}
+
+/// Runs one script and gives its exit code, which is zero on success.
+pub fn run_one(script: Script, env: &[(&str, String)], dir: Option<&Path>) -> Result<u8, String> {
+    let (mut process, bash) = command(script, env, dir);
+    let status = process.status().map_err(|error| not_started(&bash, error))?;
     if status.success() {
         return Ok(0);
     }
-    // No code means the script was killed by a signal.
+    // A script that a signal ended is reported the way a shell reports it,
+    // as 128 plus the signal: 130 for the interrupt of Ctrl-C.
+    #[cfg(unix)]
+    if let Some(signal) = std::os::unix::process::ExitStatusExt::signal(&status) {
+        return Ok(u8::try_from(signal.saturating_add(128)).unwrap_or(1));
+    }
     let code = status.code().and_then(|code| u8::try_from(code).ok());
     Ok(code.filter(|code| *code != 0).unwrap_or(1))
+}
+
+/// Runs the script that nothing comes after, by letting it take over this
+/// process. It only comes back when bash could not be started.
+///
+/// With `yio` out of the way, the script is the program the calling shell
+/// is waiting for. Its exit code, or the signal that ended it, reaches that
+/// shell untranslated. And Ctrl-C, which goes to everything the terminal is
+/// running, no longer ends `yio` and returns the prompt while the script is
+/// still cleaning up. There is one process fewer besides.
+///
+/// Not in the unit tests, where the process is the test run.
+#[cfg(all(unix, not(test)))]
+fn run_last(script: Script, env: &[(&str, String)], dir: Option<&Path>) -> Result<u8, String> {
+    use std::os::unix::process::CommandExt;
+    let (mut process, bash) = command(script, env, dir);
+    Err(not_started(&bash, process.exec()))
+}
+
+/// Where a process cannot be replaced, the last script runs like the rest.
+#[cfg(not(all(unix, not(test))))]
+fn run_last(script: Script, env: &[(&str, String)], dir: Option<&Path>) -> Result<u8, String> {
+    run_one(script, env, dir)
 }
 
 /// Adds the arguments that make `bash` run `script`.

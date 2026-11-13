@@ -919,7 +919,11 @@ fn embed_link(paragraph: &str) -> Option<Link<'_>> {
         Some((file, section)) => (file, Some(section).filter(|section| !section.is_empty())),
         None => (target, None),
     };
-    let relative = !target.contains("://") && !file.starts_with('/');
+    // Judged by how the path is written, the same on every platform, so
+    // that a `yio.md` means one thing wherever it is read. A Windows path
+    // with a drive (`C:/work/yio.md`) is as absolute as one from the root.
+    let drive = matches!(file.as_bytes(), [letter, b':', ..] if letter.is_ascii_alphabetic());
+    let relative = !target.contains("://") && !file.starts_with(['/', '\\']) && !drive;
     let named = match file {
         "" => section.is_some(),
         file => file.rsplit('/').next() == Some(FILE_NAME),
@@ -1279,10 +1283,15 @@ See [docs](docs/yio.md) for more.
 [readme](README.md)
 
 [rooted](/etc/yio.md)
+
+[drive](C:/work/yio.md)
+
+[lower-drive](d:yio.md)
 ";
+        // Nothing can be read in this test, so an embed would be an error.
         let root = parse(source).unwrap();
         let help = root.subcommands[0].long_help.as_deref().unwrap();
-        assert_eq!(help.split("\n\n").count(), 4);
+        assert_eq!(help.split("\n\n").count(), 6);
     }
 
     /// Loads the first of `files`, serving the rest by path for embedding.
