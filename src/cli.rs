@@ -287,7 +287,9 @@ impl<'a, 'b> State<'a, 'b> {
             && let Some(extra) = self.positionals.get(command.params.len())
         {
             return Err(if command.params.is_empty() && !command.subcommands.is_empty() {
-                format!("unknown command `{extra}` for `{path}`")
+                let names = command.subcommands.iter().map(|sub| sub.name.as_str());
+                let meant = nearest(extra, names).map(|name| format!("; did you mean `{name}`?"));
+                format!("unknown command `{extra}` for `{path}`{}", meant.unwrap_or_default())
             } else {
                 format!("unexpected argument `{extra}` for `{path}`")
             });
@@ -332,7 +334,16 @@ impl<'a, 'b> State<'a, 'b> {
     }
 
     fn unknown_flag(&self, label: &str) -> String {
-        format!("unknown flag `{label}` for `{}`", self.display_path())
+        // Only a long flag has enough letters to guess from.
+        let meant = label.strip_prefix("--").and_then(|typed| {
+            let own = self.command.flags.iter().filter_map(|flag| flag.long.as_deref());
+            let mut known: Vec<&str> = own.collect();
+            for builtin in Builtin::ALL {
+                known.push(builtin.long());
+            }
+            nearest(typed, known.into_iter()).map(|name| format!("; did you mean `--{name}`?"))
+        });
+        format!("unknown flag `{label}` for `{}`{}", self.display_path(), meant.unwrap_or_default())
     }
 
     fn display_path(&self) -> String {
@@ -343,6 +354,53 @@ impl<'a, 'b> State<'a, 'b> {
         }
         path
     }
+}
+
+/// The one of `known` that `typed` was most likely meant to be, for an
+/// error message to suggest. `None` when nothing is close, or when two are
+/// equally close and a guess would be a coin toss.
+///
+/// Close is a slip of the fingers: one edit in a short name, up to a third
+/// of the letters in a longer one. Failing that, it is the one name that
+/// `typed` is the start of, as `rel` is of `release`.
+fn nearest<'a>(typed: &str, known: impl Iterator<Item = &'a str>) -> Option<&'a str> {
+    let known: Vec<&str> = known.collect();
+    let allowed = (typed.chars().count() / 3).max(1);
+    let within = known.iter().map(|name| (edits(typed, name), *name)).filter(|(edits, _)| *edits <= allowed);
+    let closest = within.clone().map(|(edits, _)| edits).min();
+    let mut candidates: Vec<&str> = match closest {
+        Some(closest) => within.filter(|(edits, _)| *edits == closest).map(|(_, name)| name).collect(),
+        None if typed.chars().count() >= 2 => {
+            known.iter().copied().filter(|name| name.starts_with(typed)).collect()
+        }
+        None => Vec::new(),
+    };
+    match candidates.len() {
+        1 => candidates.pop(),
+        _ => None,
+    }
+}
+
+/// How many edits turn `a` into `b`, where an edit adds, drops, or changes
+/// one character, or swaps two that are side by side.
+fn edits(a: &str, b: &str) -> usize {
+    let (a, b): (Vec<char>, Vec<char>) = (a.chars().collect(), b.chars().collect());
+    // One row of the usual table at a time: `row[j]` is the count for the
+    // first `i` characters of `a` and the first `j` of `b`.
+    let mut before: Vec<usize> = Vec::new();
+    let mut previous: Vec<usize> = (0..=b.len()).collect();
+    for i in 1..=a.len() {
+        let mut row = vec![i; b.len() + 1];
+        for j in 1..=b.len() {
+            let same = a[i - 1] == b[j - 1];
+            row[j] = (previous[j] + 1).min(row[j - 1] + 1).min(previous[j - 1] + usize::from(!same));
+            if i > 1 && j > 1 && a[i - 1] == b[j - 2] && a[i - 2] == b[j - 1] {
+                row[j] = row[j].min(before[j - 2] + 1);
+            }
+        }
+        before = std::mem::replace(&mut previous, row);
+    }
+    previous[b.len()]
 }
 
 /// The value of a boolean flag: bare means true, `=true` and `=false` are
@@ -687,6 +745,57 @@ echo
         assert_eq!(below(&words, &mount("docs api")), [""; 0]);
         assert_eq!(below(&args("docs"), &mount("docs")), [""; 0]);
         assert_eq!(below(&args("-- docs search"), &mount("docs")), [""; 0]);
+    }
+
+    #[test]
+    fn counts_the_edits_between_two_names() {
+        let cases = [
+            ("build", "build", 0),
+            ("", "abc", 3),
+            ("abc", "", 3),
+            ("biuld", "build", 1),
+            ("buld", "build", 1),
+            ("buildd", "build", 1),
+            ("guild", "build", 1),
+            ("ab", "ba", 1),
+            ("ca", "abc", 3),
+            ("kitten", "sitting", 3),
+            ("caf\u{e9}", "cafe", 1),
+        ];
+        for (a, b, expected) in cases {
+            assert_eq!(edits(a, b), expected, "{a} to {b}");
+            assert_eq!(edits(b, a), expected, "{b} to {a}");
+        }
+    }
+
+    #[test]
+    fn an_unknown_name_suggests_the_one_that_was_meant() {
+        let root = tree();
+        let error = |line: &str| parse(&root, &args(line)).unwrap_err();
+        // A slip of the fingers, or the start of a name.
+        assert_eq!(error("biuld web"), "unknown command `biuld` for `yio`; did you mean `build`?");
+        assert_eq!(error("serch"), "unknown command `serch` for `yio`; did you mean `search`?");
+        assert_eq!(error("gr"), "unknown command `gr` for `yio`; did you mean `group`?");
+        assert_eq!(error("group laef"), "unknown command `laef` for `yio group`; did you mean `leaf`?");
+        assert_eq!(error("build web --relese"), "unknown flag `--relese` for `yio build`; did you mean `--release`?");
+        assert_eq!(error("build web --job=8"), "unknown flag `--job` for `yio build`; did you mean `--jobs`?");
+        // The built-in flags are known everywhere.
+        assert_eq!(error("build web --dryrun"), "unknown flag `--dryrun` for `yio build`; did you mean `--dry-run`?");
+        assert_eq!(error("--verbos"), "unknown flag `--verbos` for `yio`; did you mean `--verbose`?");
+
+        // Nothing close, so nothing is suggested.
+        assert_eq!(error("deploy"), "unknown command `deploy` for `yio`");
+        assert_eq!(error("build web --color"), "unknown flag `--color` for `yio build`");
+        // A flag of another command is not one of this command's.
+        assert_eq!(error("build clean --relese"), "unknown flag `--relese` for `yio build clean`");
+        // One letter is too little to go on, and so is a short flag.
+        assert_eq!(error("b"), "unknown command `b` for `yio`");
+        assert_eq!(error("build web -x"), "unknown flag `-x` for `yio build`");
+        // Two that are equally close: a guess would be a coin toss.
+        let twins = markdown::parse("## test\n## text\n## tend\n").unwrap();
+        assert_eq!(parse(&twins, &args("tezt")).unwrap_err(), "unknown command `tezt` for `yio`");
+        assert_eq!(parse(&twins, &args("te")).unwrap_err(), "unknown command `te` for `yio`");
+        assert_eq!(parse(&twins, &args("ten")).unwrap_err(), "unknown command `ten` for `yio`; did you mean `tend`?");
     }
 
     #[test]

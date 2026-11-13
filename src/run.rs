@@ -144,14 +144,24 @@ fn command(script: Script, env: &[(&str, String)], dir: Option<&Path>) -> (Proce
     (process, bash)
 }
 
-fn not_started(bash: &Path, error: std::io::Error) -> String {
-    format!("could not run `{}`: {error}", bash.display())
+/// The error for a bash that did not start.
+///
+/// The usual reason is that there is none, which the system reports as a
+/// file not being found without saying which. It says the same when the
+/// directory to run in is missing, so that is ruled out first.
+fn not_started(bash: &Path, dir: Option<&Path>, error: std::io::Error) -> String {
+    let nowhere = dir.is_some_and(|dir| !dir.is_dir());
+    if error.kind() != std::io::ErrorKind::NotFound || nowhere {
+        return format!("could not run `{}`: {error}", bash.display());
+    }
+    let hint = if cfg!(windows) { "; Git for Windows and WSL each come with one" } else { "" };
+    format!("there is no `bash` on PATH, and yio runs every script with it{hint}")
 }
 
 /// Runs one script and gives its exit code, which is zero on success.
 pub fn run_one(script: Script, env: &[(&str, String)], dir: Option<&Path>) -> Result<u8, String> {
     let (mut process, bash) = command(script, env, dir);
-    let status = process.status().map_err(|error| not_started(&bash, error))?;
+    let status = process.status().map_err(|error| not_started(&bash, dir, error))?;
     if status.success() {
         return Ok(0);
     }
@@ -179,7 +189,7 @@ pub fn run_one(script: Script, env: &[(&str, String)], dir: Option<&Path>) -> Re
 fn run_last(script: Script, env: &[(&str, String)], dir: Option<&Path>) -> Result<u8, String> {
     use std::os::unix::process::CommandExt;
     let (mut process, bash) = command(script, env, dir);
-    Err(not_started(&bash, process.exec()))
+    Err(not_started(&bash, dir, process.exec()))
 }
 
 /// Where a process cannot be replaced, the last script runs like the rest.
@@ -346,7 +356,27 @@ mod wsl {
 mod tests {
     use std::process::ExitCode;
 
-    use super::{array, is_idle, plan, quote, run};
+    use super::{array, is_idle, not_started, plan, quote, run};
+
+    #[test]
+    fn a_missing_bash_is_said_in_so_many_words() {
+        use std::io::{Error, ErrorKind};
+        use std::path::Path;
+
+        let bash = Path::new("bash");
+        let missing = not_started(bash, None, Error::from(ErrorKind::NotFound));
+        assert!(missing.starts_with("there is no `bash` on PATH, and yio runs every script with it"), "{missing}");
+        // Where to get one is only a question on Windows.
+        assert_eq!(missing.contains("Git for Windows"), cfg!(windows));
+
+        // Anything else is reported as the system put it.
+        let denied = not_started(bash, None, Error::from(ErrorKind::PermissionDenied));
+        assert!(denied.starts_with("could not run `bash`: "), "{denied}");
+        // So is a directory that is not there, which looks the same to the
+        // system as a bash that is not.
+        let nowhere = not_started(bash, Some(Path::new("no/such/directory")), Error::from(ErrorKind::NotFound));
+        assert!(nowhere.starts_with("could not run `bash`: "), "{nowhere}");
+    }
 
     #[test]
     fn a_script_of_only_comments_gives_bash_nothing_to_do() {

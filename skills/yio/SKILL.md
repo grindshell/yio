@@ -180,6 +180,8 @@ A command that must be confirmed has a required flag. `yio deploy staging` then 
 | A paragraph of help vanished and commands appeared | A paragraph that is only a link to a `yio.md` is an embed. Add words around the link to keep it as text. |
 | A later step ran after an earlier one failed | No `set -e`. See above. |
 | The command works alone but not through the parent directory | Scripts run in their own file's directory. Paths relative to where `yio` was typed do not hold. |
+| "unknown command ... did you mean" | A near miss of a command or long flag is named in the error. Nothing is run on the guess. |
+| "there is no `bash` on PATH" | `yio` runs every code block with bash. On Windows, Git for Windows or WSL provides one. |
 | On Windows, programs are not found | `yio` uses the first `bash` on `PATH`. The WSL launcher sees Linux's programs, Git Bash sees Windows's. |
 
 ## Splitting a project across directories

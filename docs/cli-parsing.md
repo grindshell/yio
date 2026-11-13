@@ -21,6 +21,7 @@ Nothing about the commands is known at compile time, so there is no argument-par
 - **Arity is checked.** A missing `(REQUIRED)` argument and an argument beyond the declared ones are both errors. Required arguments cannot be declared after optional ones.
 - **A flag can be required.** One declared with `required: true` has to be on the command line, or the command does not run: ``missing required flag `--yes` for `yio deploy` ``. Being given is what counts, not the value, so `--yes=false` satisfies it. A required flag cannot have a `default`, which would never be used.
 - **`[...NAME]` takes the rest.** Once the required arguments are filled, every further argument goes to it. See below.
+- **A near miss is pointed out.** An unknown command or long flag that is close to a known one names it: ``unknown command `biuld` for `yio`; did you mean `build`?``. Close is one edit (a letter added, dropped, changed, or swapped with its neighbour), or up to a third of the letters in a longer name. Failing that, it is the one name the word is the start of, as `rel` is of `release`. Nothing is suggested when two names are equally close, for a single letter, or for a short flag. The built-in flags count as known on every command, and nothing is ever run on a guess.
 
 ## The rest of the arguments
 
@@ -87,7 +88,7 @@ A command with no code block has nothing to run, so naming it prints the same de
 
 ## Running
 
-The bash that runs is the first one on `PATH`. On Windows `yio` searches `PATH` for `bash.exe` itself, because the standard library looks in the system directories first and would pick the WSL launcher in System32 over a bash that comes earlier on `PATH`.
+The bash that runs is the first one on `PATH`. When there is none, the error says so, and on Windows where to get one: ``there is no `bash` on PATH, and yio runs every script with it; Git for Windows and WSL each come with one``. On Windows `yio` searches `PATH` for `bash.exe` itself, because the standard library looks in the system directories first and would pick the WSL launcher in System32 over a bash that comes earlier on `PATH`.
 
 That launcher (`C:\Windows\System32\bash.exe`) does not pass its arguments to bash unchanged. It sends the rest of its command line through a shell inside WSL, so a script given as an ordinary `-c` argument is expanded twice: `echo '$HOME'` prints a path and `awk '{print $2}'` loses its `$2`. When the bash found is in the system directory, `yio` writes the script onto the command line itself as one single-quoted shell word, which that first shell leaves alone.
 
