@@ -82,7 +82,7 @@ describes one.
 | `(NAME)` in a heading | A required argument. |
 | `[NAME]` in a heading | An optional argument. |
 | `[...NAME]` last in a heading | Takes all the arguments that are left, as the bash array `NAME`. |
-| `**FLAGS**` and a list | Named flags, each with `flags`, and optionally `type`, `default`, and `description`. |
+| `**FLAGS**` and a list | Named flags, each with `flags`, and optionally `type`, `default`, `required`, and `description`. |
 | A paragraph that is only a link to another `yio.md` | Embeds that file: its commands nest under the heading. With `#anchor`, only the command under that heading. |
 
 Arguments and flags reach the script as environment variables, under the name exactly as written. A `[...NAME]` argument is a list, so it reaches the script as a bash array instead:
@@ -110,6 +110,7 @@ Every command also accepts these flags:
 | `-v`, `--version` | `YIO_VERSION` | Prints the version |
 | `--cache` | `YIO_CACHE` | Writes `.yio/cache.yio` |
 | `--remove-cache` | `YIO_REMOVE_CACHE` | Removes it |
+| `--dry-run` | `YIO_DRY_RUN` | Shows what the command would run, without running it |
 
 The full rules are in [docs/cli-parsing.md](docs/cli-parsing.md), and embedding in [docs/embedding.md](docs/embedding.md).
 

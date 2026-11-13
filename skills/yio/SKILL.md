@@ -15,12 +15,12 @@ The `yio` binary is expected on `PATH`. If `yio --version` fails, say so and poi
 
 1. **Look.** Run `yio` in the directory to list the commands, and read the `yio.md`. Check for a `.yio/` directory: plugins there run on every use of the file (see "Plugins" below).
 2. **Edit** the `yio.md`.
-3. **Check.** Run `yio` again. A file that does not load fails with `yio: yio.md: line N: ...`, which says what to fix. Then `yio COMMAND --help` to see a command as a user will, and run the command when that is harmless.
+3. **Check.** Run `yio` again. A file that does not load fails with `yio: yio.md: line N: ...`, which says what to fix. Then `yio COMMAND --help` to see a command as a user will, `yio COMMAND ARGS --dry-run` to see the values and scripts it would run, and run the command when that is harmless.
 4. **Check the booleans.** `yio --cache` reads every script and warns when one tests a boolean flag in a way that cannot work. It writes `.yio/cache.yio`, so if that file was not there before and the project does not want a cache (see [references/plugins.md](references/plugins.md) for when it does), finish with `yio --remove-cache`. That also removes a `.yio/` directory it leaves empty.
 
 `--help` never runs a command's script, so it is safe on any command. It does still run the directory's plugins; only `--version` and `--remove-cache` run nothing.
 
-There is no dry run. A script that is not safe to run is checked by reading it, by `--help`, and by the paths that stop early (a missing argument, a refused confirmation). `yio`'s own errors exit with 2; otherwise the exit code is the script's.
+`--dry-run` is how to check a command that is not safe to run. It resolves the command line as a real run would, with the same errors for a missing argument or flag, and prints each variable with its value and each code block with its line, running none of them. Like `--help`, it still runs plugins. `yio`'s own errors exit with 2; otherwise the exit code is the script's.
 
 **On Windows, find out which bash will run before writing scripts.** `yio` uses the first `bash` on `PATH` (`Get-Command bash` or `where bash` shows it). If that is `C:\Windows\System32\bash.exe`, scripts run inside WSL: a Linux system, working directory under `/mnt/c/...`, where programs installed on the Windows side (`npm`, `cargo`) are usually not found. Git Bash sees the Windows programs. Tell the user which one their scripts will get when it matters.
 
@@ -94,8 +94,9 @@ That gives `yio build web prod -j 8 --release`, `yio build clean`, `yio test par
 Details that the loader enforces:
 
 - **Headings** are a command name followed only by argument tokens. Anything else in the heading is an error. Only `#`-style headings count.
-- **Flags.** The item text is the variable name. `flags` is required and takes one short form, one long form, or both (`-j --jobs`). `type` is `string` (the default) or `boolean`. `default` and `description` are optional. A boolean's default must be `true` or `false`. Flags belong to the command they are written under and are not inherited by subcommands.
-- **Flags are always optional.** There is no `required` option, so a flag that must be given is checked by the script (see the confirmation example under "Writing a good one"). A `default` is shown in the help as `[default: 4]` automatically, so the description need not repeat it.
+- **Flags.** The item text is the variable name. `flags` is required and takes one short form, one long form, or both (`-j --jobs`). `type` is `string` (the default) or `boolean`. `default`, `required`, and `description` are optional. A boolean's default must be `true` or `false`. Flags belong to the command they are written under and are not inherited by subcommands.
+- **`required: true`** makes a flag one that has to be given: without it `yio` stops with "missing required flag" before any script runs. The usage line shows it and the flag list marks it `[required]`. It cannot be combined with a `default`. Being given is what counts, so `--yes=false` passes; a script that must not act on `false` still tests the value.
+- A `default` is shown in the help as `[default: 4]` automatically, so the description need not repeat it.
 - **Names** of arguments and flags must be valid environment variable names, and unique within a command even ignoring case. `WSLENV` is reserved. Upper snake case is the convention. They become real environment variables, so do not use a name that already means something to bash or to the programs the script runs: `PATH`, `HOME`, `IFS`, `PWD`, `USER`, `SHELL`, `LANG`.
 - **`[...NAME]`** needs a command with no optional arguments and no subcommands, because nothing could tell them apart on the command line.
 - **A command with no code block** has nothing to run, so naming it prints its help. That is the normal shape for a heading that only groups subcommands.
@@ -113,7 +114,7 @@ Each code block runs with `bash -c`, in the directory of the `yio.md` that defin
 | Boolean flag | `$NAME`, the string `true` or `false` | Its `default`, else `false` |
 | `[...NAME]` | The bash array `NAME` | An empty array |
 
-Arguments and flags are environment variables, so programs the script starts see them too: with a flag named `PORT`, `npm run dev` already has `PORT` in its environment. Every argument and flag of the command is always set, so a value never leaks in from the calling shell. `YIO_VERSION`, `YIO_HELP`, `YIO_VERBOSE`, `YIO_CACHE`, and `YIO_REMOVE_CACHE` are set as well.
+Arguments and flags are environment variables, so programs the script starts see them too: with a flag named `PORT`, `npm run dev` already has `PORT` in its environment. Every argument and flag of the command is always set, so a value never leaks in from the calling shell. `YIO_VERSION`, `YIO_HELP`, `YIO_VERBOSE`, `YIO_CACHE`, `YIO_REMOVE_CACHE`, and `YIO_DRY_RUN` are set as well.
 
 Things that follow from this, and that are easy to get wrong:
 
@@ -129,39 +130,35 @@ Things that follow from this, and that are easy to get wrong:
 - `--` makes everything after it an argument: `yio run -- --version`.
 - Flags can be written `--jobs 8`, `--jobs=8`, `-j 8`, `-j8`, and clustered as `-rj 8`. A boolean flag never takes the next word: bare means `true`, and `--release=false` or `--release=true` is the only way to give it a value. A string flag always takes the next word, even one that starts with `-`.
 - A parent's flag before a subcommand name (`yio build --release clean`) is an error.
-- The built-in flags work on every command: `-h --help`, `-V --verbose`, `-v --version`, `--cache`, `--remove-cache`. A command that defines a flag with one of those spellings replaces the built-in for itself, so avoid `-h`, `-v`, and `-V` for your own flags.
+- The built-in flags work on every command: `-h --help`, `-V --verbose`, `-v --version`, `--cache`, `--remove-cache`, `--dry-run`. A command that defines a flag with one of those spellings replaces the built-in for itself, so avoid `-h`, `-v`, and `-V` for your own flags. A command with a `--dry-run` flag of its own gets that flag set and runs; give it another spelling if `yio`'s dry run should still work there.
 
 ## Writing a good one
 
 The file is read by people as often as it is run, so write it as the project's task documentation.
 
 - Give every command a `>` line. It is all a listing shows: the name, the arguments, and that line. Flags appear only in the command's own `--help`, so a flag someone has to know about belongs in the `>` line.
-- Use the paragraphs for what someone needs before running the command: what it changes, what it needs installed, an example invocation. Leave out notes to yourself, since paragraphs are shown to users. Help is printed as plain text, as written: backticks stay, and indentation is dropped.
+- Use the paragraphs for what someone needs before running the command: what it changes, what it needs installed, an example invocation. Leave out notes to yourself, since paragraphs are shown to users. Help is printed as plain text, as written: backticks stay, and lines indented four or more spaces stay indented.
 - Prefer a flag with a `default` over an optional argument for a setting. Arguments suit the thing being acted on.
 - Group related commands as subcommands under a heading with no code block (`## db`, `### migrate`, `### seed`).
 - Quote expansions (`"$TARGET"`), as in any bash.
 - To show example output in the help, indent it four spaces. A fenced block is always a script, and any tag other than `bash` is an error precisely so that an example is never run by accident.
 - Keep long logic in a script file and call it from the code block. The `yio.md` stays readable and the script can be linted.
 
-A command that must be confirmed checks its own flag, since flags cannot be required:
+A command that must be confirmed has a required flag. `yio deploy staging` then stops with "missing required flag `--yes`", and the usage line reads `yio deploy (TARGET) --yes [flags]`:
 
 ````markdown
 ## deploy (TARGET)
 
-> Deploy to a target. Does nothing without --yes
+> Deploy to a target. Needs --yes
 
 **FLAGS**
 - YES
   - flags: `-y --yes`
   - type: boolean
+  - required: true
   - description: Confirm the deploy
 
 ```bash
-set -e
-if [ "$YES" != true ]; then
-  echo "Refusing to deploy to $TARGET without --yes." >&2
-  exit 1
-fi
 ./scripts/deploy.sh "$TARGET"
 ```
 ````
@@ -175,6 +172,7 @@ fi
 | "required argument ... cannot follow an optional one" | Order is `(REQUIRED)` then `[OPTIONAL]`. |
 | "`[...X]` cannot be used with the optional argument" | Make the optional one a flag. |
 | "takes `[...X]`, so it cannot have the subcommand" | A rest argument and subcommands exclude each other, embedded ones included. |
+| "missing required flag" | The flag is declared `required: true`. `--help` and `--version` work without it. |
 | "flag `-r` belongs to `yio build`, not to its subcommand" | Flags are not inherited. Define the flag on the subcommand as well. |
 | "differs from ... only by case" | Names must be unique ignoring case, because Windows environment names are. |
 | A paragraph of help vanished and commands appeared | A paragraph that is only a link to a `yio.md` is an embed. Add words around the link to keep it as text. |

@@ -36,7 +36,7 @@ use crate::input::{Input, PathKind};
 pub const FILE: &str = ".yio/cache.yio";
 
 /// Bumped whenever the payload layout changes.
-const FORMAT: u8 = 6;
+const FORMAT: u8 = 7;
 const PREFIX: &[u8] = b"(cache #";
 
 /// How deeply commands may nest in a cache file. Real trees stay far below
@@ -370,6 +370,7 @@ fn put_command(out: &mut Vec<u8>, command: &Command) {
         });
         put_option(out, flag.default.as_deref());
         put_option(out, flag.description.as_deref());
+        put_u8(out, u8::from(flag.required));
     }
     put_len(out, command.scripts.len());
     for (i, script) in command.scripts.iter().enumerate() {
@@ -426,6 +427,7 @@ fn take_command(reader: &mut Reader, depth: usize) -> Result<Command, String> {
             },
             default: reader.option()?,
             description: reader.option()?,
+            required: reader.u8()? != 0,
         });
     }
     for _ in 0..reader.u32()? {
@@ -461,6 +463,9 @@ Longer description.
 - RELEASE
   - flags: --release
   - type: boolean
+- TO
+  - flags: --to
+  - required: true
 
 ```
 echo one

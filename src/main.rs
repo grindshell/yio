@@ -125,6 +125,13 @@ fn run() -> Result<ExitCode, String> {
             warn(command);
         }
         let list = invocation.rest.as_ref().map(|(name, values)| (*name, values.as_slice()));
+        if builtins.dry_run {
+            let title = std::iter::once("yio").chain(invocation.path.iter().copied());
+            let title = title.collect::<Vec<_>>().join(" ");
+            let file = file_of(command);
+            print!("{}", run::plan(&title, &file, &command.scripts, &command.lines, &invocation.vars, list));
+            return Ok(ExitCode::SUCCESS);
+        }
         run::run(&command.scripts, &invocation.env(), list, command.dir.as_deref())
     }
 }
@@ -132,11 +139,17 @@ fn run() -> Result<ExitCode, String> {
 /// Reports the uses of boolean variables in a command's scripts that
 /// cannot work. These are warnings: the command still runs.
 fn warn(command: &Command) {
-    let dir = command.dir.as_deref().unwrap_or(Path::new(""));
-    let file = dir.join(FILE).to_string_lossy().replace('\\', "/");
+    let file = file_of(command);
     for warning in check::booleans(command) {
         eprintln!("yio: warning: {file}: line {}: {}", warning.line, warning.message);
     }
+}
+
+/// The `yio.md` that defines a command, as a path from the current
+/// directory.
+fn file_of(command: &Command) -> String {
+    let dir = command.dir.as_deref().unwrap_or(Path::new(""));
+    dir.join(FILE).to_string_lossy().replace('\\', "/")
 }
 
 /// Does the same for a command and everything under it.

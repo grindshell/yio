@@ -16,6 +16,7 @@ pub struct Builtins {
     pub version: bool,
     pub cache: bool,
     pub remove_cache: bool,
+    pub dry_run: bool,
 }
 
 /// The outcome of parsing: which command was named and with what values.
@@ -55,6 +56,7 @@ impl Builtins {
             Builtin::Version => VERSION.to_string(),
             Builtin::Cache => self.cache.to_string(),
             Builtin::RemoveCache => self.remove_cache.to_string(),
+            Builtin::DryRun => self.dry_run.to_string(),
         };
         Builtin::ALL.into_iter().map(|builtin| (builtin.env_name(), value(builtin))).collect()
     }
@@ -66,6 +68,7 @@ impl Builtins {
             Builtin::Version => &mut self.version,
             Builtin::Cache => &mut self.cache,
             Builtin::RemoveCache => &mut self.remove_cache,
+            Builtin::DryRun => &mut self.dry_run,
         } = value;
     }
 }
@@ -252,11 +255,7 @@ impl<'a, 'b> State<'a, 'b> {
         // Flags are not inherited, so one given before the subcommand name
         // would otherwise be dropped silently.
         if let Some((flag, _)) = self.given.first() {
-            let label = match (&flag.long, flag.short) {
-                (Some(long), _) => format!("--{long}"),
-                (None, Some(short)) => format!("-{short}"),
-                (None, None) => flag.name.clone(),
-            };
+            let label = flag.label();
             return Err(format!(
                 "flag `{label}` belongs to `{}`, not to its subcommand `{}`",
                 self.display_path(),
@@ -308,6 +307,10 @@ impl<'a, 'b> State<'a, 'b> {
         }
         for flag in &command.flags {
             let given = self.given.iter().find(|(f, _)| std::ptr::eq(*f, flag));
+            // As with a required argument, not when the command will not run.
+            if given.is_none() && flag.required && !self.builtins.help && !self.builtins.version {
+                return Err(format!("missing required flag `{}` for `{path}`", flag.label()));
+            }
             let value = match (given, &flag.default, flag.ty) {
                 (Some((_, value)), _, _) => value.clone(),
                 (None, Some(default), _) => default.clone(),
@@ -575,8 +578,64 @@ echo
                 ("YIO_VERSION", VERSION.to_string()),
                 ("YIO_CACHE", "false".to_string()),
                 ("YIO_REMOVE_CACHE", "false".to_string()),
+                ("YIO_DRY_RUN", "false".to_string()),
             ]
         );
+    }
+
+    #[test]
+    fn a_dry_run_is_asked_for_like_any_built_in() {
+        let root = tree();
+        let invocation = parse(&root, &args("build web --dry-run -j 8")).unwrap();
+        assert!(invocation.builtins.dry_run);
+        // The command is resolved as it would be for a real run.
+        assert_eq!(invocation.path, ["build"]);
+        assert!(invocation.vars.contains(&("JOBS", "8".to_string())));
+        assert!(parse(&root, &args("build --dry-run")).unwrap_err().contains("missing required argument"));
+        assert_eq!(scan(&args("build web --dry-run")), Builtins { dry_run: true, ..Builtins::default() });
+        assert_eq!(words(&args("build web --dry-run")), ["build", "web"]);
+    }
+
+    #[test]
+    fn a_required_flag_has_to_be_given() {
+        let source = "\
+## deploy (TARGET)
+
+**FLAGS**
+- YES
+  - flags: -y --yes
+  - type: boolean
+  - required: true
+- TAG
+  - flags: -t
+  - required: true
+- NOTE
+  - flags: --note
+
+```
+echo
+```
+";
+        let root = markdown::parse(source).unwrap();
+        let run = |line: &str| parse(&root, &args(line)).map(|invocation| invocation.vars);
+        assert_eq!(
+            run("deploy prod --yes -t v1").unwrap(),
+            [
+                ("TARGET", "prod".to_string()),
+                ("YES", "true".to_string()),
+                ("TAG", "v1".to_string()),
+                ("NOTE", String::new()),
+            ]
+        );
+        // Each is named by its long form, or its short one when that is all it has.
+        assert_eq!(run("deploy prod -t v1").unwrap_err(), "missing required flag `--yes` for `yio deploy`");
+        assert_eq!(run("deploy prod -y").unwrap_err(), "missing required flag `-t` for `yio deploy`");
+        // Given is given, whatever the value.
+        assert!(run("deploy prod --yes=false -t v1").unwrap().contains(&("YES", "false".to_string())));
+        assert!(run("deploy prod -y -t=").unwrap().contains(&("TAG", String::new())));
+        // Describing the command does not need them, as with its arguments.
+        assert!(run("deploy --help").is_ok());
+        assert!(run("deploy --version").is_ok());
     }
 
     #[test]

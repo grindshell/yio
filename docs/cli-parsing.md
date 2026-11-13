@@ -19,6 +19,7 @@ Nothing about the commands is known at compile time, so there is no argument-par
 - **Flags are not inherited.** A flag belongs to the command it is defined on. Giving a parent's flag before a subcommand name (`yio build --release clean`) is an error rather than being dropped.
 - **Built-ins work anywhere**, at any depth and in any position. A command's own flags are looked up first, so a flag that reuses `-v` or the name `YIO_VERBOSE` replaces the built-in for that command.
 - **Arity is checked.** A missing `(REQUIRED)` argument and an argument beyond the declared ones are both errors. Required arguments cannot be declared after optional ones.
+- **A flag can be required.** One declared with `required: true` has to be on the command line, or the command does not run: ``missing required flag `--yes` for `yio deploy` ``. Being given is what counts, not the value, so `--yes=false` satisfies it. A required flag cannot have a `default`, which would never be used.
 - **`[...NAME]` takes the rest.** Once the required arguments are filled, every further argument goes to it. See below.
 
 ## The rest of the arguments
@@ -61,7 +62,7 @@ done
 
 ## Help
 
-`--help` / `-h` describes the resolved command instead of running it: its short help, usage, subcommands, and flags. Paragraph text is added with `--verbose`, for the command itself and for each listed subcommand. It takes precedence over `--version`. Neither runs the command, so both work without its required arguments: `yio build --help`, `yio build --version`.
+`--help` / `-h` describes the resolved command instead of running it: its short help, usage, subcommands, and flags. Paragraph text is added with `--verbose`, for the command itself and for each listed subcommand. It takes precedence over `--version`. Neither runs the command, so both work without its required arguments and flags: `yio build --help`, `yio build --version`.
 
 Usage is shown as one form per way of invoking the command, because a subcommand is only recognized before the first argument:
 
@@ -70,7 +71,13 @@ Usage: yio build (TARGET) [PROFILE] [flags]
        yio build <command> [flags]
 ```
 
-The first form is left out when the command has subcommands and nothing to run; the second when it has no subcommands.
+The first form is left out when the command has subcommands and nothing to run; the second when it has no subcommands. Flags that are required are written into the first form, and marked `[required]` in the list of flags:
+
+```
+Usage: yio deploy (TARGET) --yes [flags]
+```
+
+Text indented four or more spaces in the long help is an example, and is shown indented by four, with any further indentation kept.
 
 The flag list shows what the parser will actually do. A command's flag shadows a built-in one spelling at a time, so a command that defines `-h --hot` lists the built-in as `--help` only, and a built-in with every spelling shadowed is not listed.
 
@@ -89,6 +96,31 @@ Scripts run in the directory of the `yio.md` that defines them, which matters fo
 Each code block of a command runs as its own `bash -c` process, in the order written. They share the injected variables and nothing else: shell variables, options, and the working directory set by one block do not reach the next. The first block that exits non-zero stops the run, and its exit code becomes `yio`'s.
 
 Bash is not started for a code block that gives it nothing to do: one whose every line is blank or a comment. That is the block of a command a plugin answers (see "An example" in [plugins.md](plugins.md)), and starting bash would be most of what such a command costs.
+
+## Dry run
+
+`--dry-run` resolves the command exactly as a real run does, then prints what would happen in place of doing it:
+
+```
+$ yio deploy staging --yes --dry-run
+# Dry run of `yio deploy`: nothing below has been run.
+TARGET='staging'
+YES='true'
+TAG='latest'
+
+# yio.md, line 24
+set -e
+./scripts/deploy.sh "$TARGET" "$TAG"
+```
+
+- First come the values of the command's arguments and flags, then each code block with the file and line it starts on. A `[...NAME]` argument is shown as the array it would be.
+- The output is bash, so it can be read with the values in view, or pasted into a shell to step through.
+- The `YIO_*` variables are set for a real run too. They are left out here, since they say nothing about the command.
+- Everything a real run checks is checked: a missing argument or required flag is still an error. The exit code is 0.
+- A code block that bash would not be started for is marked as such.
+- **Plugins still run**, as they do for `--help`, and are told `YIO_DRY_RUN`. Only the command's own scripts are held back.
+- A command with no code block has nothing to run, so its description is printed, as without the flag.
+- A command that defines its own `--dry-run` flag keeps it. As with any built-in, the command's flag is the one that is set, and the script runs.
 
 ## Flag spellings
 
@@ -113,7 +145,7 @@ Every argument and flag of the resolved command is set, so a script never sees a
 | Boolean flag | its `default`, else `false` |
 | `[...NAME]` | an empty bash array |
 
-`YIO_HELP`, `YIO_VERBOSE`, `YIO_CACHE`, and `YIO_REMOVE_CACHE` are always set to `true` or `false`, and `YIO_VERSION` to the CLI's version.
+`YIO_HELP`, `YIO_VERBOSE`, `YIO_CACHE`, `YIO_REMOVE_CACHE`, and `YIO_DRY_RUN` are always set to `true` or `false`, and `YIO_VERSION` to the CLI's version.
 
 On Windows the injected names are also appended to `WSLENV`, because the `bash` on `PATH` is often the WSL launcher and it forwards nothing else. The name `WSLENV` is therefore reserved.
 
@@ -143,7 +175,7 @@ yio: warning: yio.md: line 11: `RELEASE` is always `true` or `false`, never empt
 - Running a command while `.yio/cache.yio` exists reports that command's scripts, each time.
 - Without a cache nothing is checked.
 
-The variables checked are the command's own boolean flags and `YIO_HELP`, `YIO_VERBOSE`, `YIO_CACHE`, and `YIO_REMOVE_CACHE`, except one whose name the command has given to an argument or to a flag of another type.
+The variables checked are the command's own boolean flags and `YIO_HELP`, `YIO_VERBOSE`, `YIO_CACHE`, `YIO_REMOVE_CACHE`, and `YIO_DRY_RUN`, except one whose name the command has given to an argument or to a flag of another type.
 
 | Flagged | Why |
 | --- | --- |
@@ -179,13 +211,14 @@ Implemented in `src/check.rs`.
 - One optional H1, before any command. Its text is ignored; a blockquote and paragraphs under it describe the file as a whole.
 - A heading is one command name followed by `(ARG)` and `[ARG]` tokens, optionally ending with `[...ARGS]` when there is no `[ARG]`. Argument and flag names must be valid environment variable names.
 - Any number of code blocks per command, each with no language or `bash`. Any other language is an error, so that a `json` example is never run as a script.
-- A fence may be indented up to three spaces, and that indentation is removed from each line of the script, as Markdown does. Anything indented four or more spaces (or a tab) is literal text: it is never a script, heading, or marker, and it lands in the verbose help.
+- A fence may be indented up to three spaces, and that indentation is removed from each line of the script, as Markdown does. Anything indented four or more spaces (or a tab) is literal text: it is never a script, heading, marker, or embed, and it lands in the verbose help with its indentation.
 - An HTML comment that starts a line (`<!--`) hides everything through the line containing `-->`, so a commented-out code block or heading is ignored. A comment that is never closed is an error.
-- `**FLAGS**` on its own line, then a list. Options are `flags` (required), `type` (`string` or `boolean`), `default`, and `description`. Values may be wrapped in backticks.
+- `**FLAGS**` on its own line, then a list. Options are `flags` (required), `type` (`string` or `boolean`), `default`, `required` (`true` or `false`), and `description`. Values may be wrapped in backticks.
 
 Errors name the file and line: `yio.md: line 12: flag `JOBS` is missing its `flags` option`.
 
 ## Not implemented
 
 - Checking booleans without a cache, and a way to silence a warning. See "Boolean checks".
+- Formatting in help text. Paragraphs are printed as written, backticks included.
 - `.yiorc`, which is not designed yet.

@@ -104,8 +104,9 @@ fn read_lines(
             i += 1;
         } else if indentation(line) >= 4 {
             // Markdown treats this as an indented code block: literal text,
-            // never a script, heading, or marker.
-            loader.paragraph_line(line_no, text);
+            // never a script, heading, or marker. It keeps its shape in the
+            // help, since it is there to show an example.
+            loader.paragraph_line(line_no, Text::Literal(outdent(line).trim_end()));
             i += 1;
         } else if text.starts_with("<!--") {
             // An HTML comment hides everything through the line that closes
@@ -146,12 +147,22 @@ fn read_lines(
             loader.end_paragraph()?;
             i = loader.flags(line_no, &lines, i + 1)?;
         } else {
-            loader.paragraph_line(line_no, text);
+            loader.paragraph_line(line_no, Text::Plain(text));
             i += 1;
         }
     }
     loader.end_paragraph()?;
     Ok(loader.finish())
+}
+
+/// One line of a paragraph.
+#[derive(Clone, Copy)]
+enum Text<'a> {
+    /// Ordinary text, without the whitespace around it.
+    Plain(&'a str),
+    /// A line indented four or more columns, without the first four. Help
+    /// shows it indented, so that an example still looks like one.
+    Literal(&'a str),
 }
 
 /// A command whose heading is still in scope.
@@ -182,7 +193,7 @@ impl Open {
 struct Loader<'a, 'c> {
     /// Commands still open. The root is at level 1 and is always present.
     stack: Vec<Open>,
-    paragraph: Vec<&'a str>,
+    paragraph: Vec<Text<'a>>,
     paragraph_line: usize,
     seen_h1: bool,
     /// Directory of the file being read, relative to the current directory.
@@ -418,7 +429,7 @@ impl<'a, 'c> Loader<'a, 'c> {
         }
     }
 
-    fn paragraph_line(&mut self, line_no: usize, text: &'a str) {
+    fn paragraph_line(&mut self, line_no: usize, text: Text<'a>) {
         if self.paragraph.is_empty() {
             self.paragraph_line = line_no;
         }
@@ -429,8 +440,11 @@ impl<'a, 'c> Loader<'a, 'c> {
         if self.paragraph.is_empty() {
             return Ok(());
         }
-        let text = self.paragraph.join("\n");
-        self.paragraph.clear();
+        let lines = self.paragraph.drain(..).map(|line| match line {
+            Text::Plain(text) => text.to_string(),
+            Text::Literal(text) => format!("    {text}"),
+        });
+        let text = lines.collect::<Vec<_>>().join("\n");
         if let Some(link) = embed_link(&text) {
             return self.embed(self.paragraph_line, link);
         }
@@ -564,6 +578,7 @@ impl FlagDraft {
                 ty: FlagType::default(),
                 default: None,
                 description: None,
+                required: false,
             },
             has_flags: false,
         })
@@ -595,11 +610,23 @@ impl FlagDraft {
             }
             "default" => self.flag.default = Some(unquote(value).to_string()),
             "description" => self.flag.description = Some(value.to_string()),
+            "required" => {
+                self.flag.required = match unquote(value) {
+                    "true" => true,
+                    "false" => false,
+                    other => {
+                        return Err(err(
+                            line_no,
+                            &format!("`required` is `{other}`; expected `true` or `false`"),
+                        ));
+                    }
+                }
+            }
             other => {
                 return Err(err(
                     line_no,
                     &format!(
-                        "unknown flag option `{other}`; expected `flags`, `type`, `default`, or `description`"
+                        "unknown flag option `{other}`; expected `flags`, `type`, `default`, `required`, or `description`"
                     ),
                 ));
             }
@@ -613,6 +640,12 @@ impl FlagDraft {
             return Err(err(
                 self.line_no,
                 &format!("flag `{name}` is missing its `flags` option"),
+            ));
+        }
+        if self.flag.required && self.flag.default.is_some() {
+            return Err(err(
+                self.line_no,
+                &format!("flag `{name}` is required, so its `default` would never be used"),
             ));
         }
         if self.flag.ty == FlagType::Boolean
@@ -780,6 +813,24 @@ fn indentation(line: &str) -> usize {
         }
     }
     width
+}
+
+/// A line without its first four columns of indentation, which is what
+/// Markdown takes off an indented code block. The caller has checked that
+/// the line is indented that far.
+fn outdent(line: &str) -> &str {
+    let mut width = 0;
+    for (at, c) in line.char_indices() {
+        if width >= 4 {
+            return &line[at..];
+        }
+        match c {
+            ' ' => width += 1,
+            '\t' => width += 4 - width % 4,
+            _ => return &line[at..],
+        }
+    }
+    ""
 }
 
 /// Splits an ATX heading into its level and title. The caller has already
@@ -1013,6 +1064,7 @@ rm -rf out/
                     ty: FlagType::String,
                     default: Some("4".into()),
                     description: Some("Number of parallel jobs".into()),
+                    required: false,
                 },
                 Flag {
                     name: "RELEASE".into(),
@@ -1021,9 +1073,42 @@ rm -rf out/
                     ty: FlagType::Boolean,
                     default: None,
                     description: None,
+                    required: false,
                 },
             ]
         );
+    }
+
+    #[test]
+    fn a_flag_can_be_required() {
+        let root = parse("## a\n**FLAGS**\n- YES\n  - flags: --yes\n  - type: boolean\n  - required: true\n- TO\n  - flags: --to\n  - required: `true`\n- X\n  - flags: -x\n  - required: false\n").unwrap();
+        let required: Vec<bool> = root.subcommands[0].flags.iter().map(|flag| flag.required).collect();
+        assert_eq!(required, [true, true, false]);
+
+        let cases = [
+            ("  - required: yes\n", "yio.md: line 5: `required` is `yes`; expected `true` or `false`"),
+            // A default would never be used, so having both is a mistake.
+            ("  - default: 4\n  - required: true\n", "yio.md: line 3: flag `X` is required, so its `default` would never be used"),
+        ];
+        for (options, expected) in cases {
+            let source = format!("## a\n**FLAGS**\n- X\n  - flags: -x\n{options}");
+            assert_eq!(parse(&source).unwrap_err(), expected, "{source:?}");
+        }
+        // Not required, so a default is fine.
+        assert!(parse("## a\n**FLAGS**\n- X\n  - flags: -x\n  - default: 4\n  - required: false\n").is_ok());
+    }
+
+    #[test]
+    fn indented_text_keeps_its_shape_in_the_help() {
+        let root = parse("## a\n\nAn example:\n\n    yio a --fast\n      then deeper\n\tand a tab\n\nAfter.\n").unwrap();
+        assert_eq!(
+            root.subcommands[0].long_help.as_deref(),
+            Some("An example:\n\n    yio a --fast\n      then deeper\n    and a tab\n\nAfter.")
+        );
+        // It is literal, so a link there is text and embeds nothing.
+        let root = parse("## a\n\n    [docs](docs/yio.md)\n").unwrap();
+        assert_eq!(root.subcommands[0].long_help.as_deref(), Some("    [docs](docs/yio.md)"));
+        assert!(root.subcommands[0].subcommands.is_empty());
     }
 
     #[test]

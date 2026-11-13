@@ -87,6 +87,30 @@ pub struct Flag {
     pub ty: FlagType,
     pub default: Option<String>,
     pub description: Option<String>,
+    /// Whether the flag has to be given on the command line. A required
+    /// flag has no default, since it would never be used.
+    pub required: bool,
+}
+
+impl Flag {
+    /// The flag as it is typed: its long form when it has one, its short
+    /// form otherwise.
+    pub fn label(&self) -> String {
+        match (&self.long, self.short) {
+            (Some(long), _) => format!("--{long}"),
+            (None, Some(short)) => format!("-{short}"),
+            (None, None) => self.name.clone(),
+        }
+    }
+
+    /// The flag as a usage line shows it: `--yes`, or `--port <PORT>` for
+    /// one that takes a value.
+    pub fn usage(&self) -> String {
+        match self.ty {
+            FlagType::Boolean => self.label(),
+            FlagType::String => format!("{} <{}>", self.label(), self.name),
+        }
+    }
 }
 
 /// Flags every command accepts. A command's own flags are looked up first, so
@@ -98,15 +122,17 @@ pub enum Builtin {
     Version,
     Cache,
     RemoveCache,
+    DryRun,
 }
 
 impl Builtin {
-    pub const ALL: [Builtin; 5] = [
+    pub const ALL: [Builtin; 6] = [
         Builtin::Help,
         Builtin::Verbose,
         Builtin::Version,
         Builtin::Cache,
         Builtin::RemoveCache,
+        Builtin::DryRun,
     ];
 
     pub fn env_name(self) -> &'static str {
@@ -116,6 +142,7 @@ impl Builtin {
             Builtin::Version => "YIO_VERSION",
             Builtin::Cache => "YIO_CACHE",
             Builtin::RemoveCache => "YIO_REMOVE_CACHE",
+            Builtin::DryRun => "YIO_DRY_RUN",
         }
     }
 
@@ -124,7 +151,7 @@ impl Builtin {
             Builtin::Help => Some('h'),
             Builtin::Verbose => Some('V'),
             Builtin::Version => Some('v'),
-            Builtin::Cache | Builtin::RemoveCache => None,
+            Builtin::Cache | Builtin::RemoveCache | Builtin::DryRun => None,
         }
     }
 
@@ -135,6 +162,7 @@ impl Builtin {
             Builtin::Version => "version",
             Builtin::Cache => "cache",
             Builtin::RemoveCache => "remove-cache",
+            Builtin::DryRun => "dry-run",
         }
     }
 
@@ -145,6 +173,7 @@ impl Builtin {
             Builtin::Version => "Print the yio version",
             Builtin::Cache => "Write the interpreted yio.md to .yio/cache.yio",
             Builtin::RemoveCache => "Remove .yio/cache.yio",
+            Builtin::DryRun => "Show what a command would run, without running it",
         }
     }
 }

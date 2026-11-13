@@ -26,7 +26,7 @@ They run in order of the number, then by file name. `NAME` is what `--verbose` l
 
 ## When they run
 
-- For every use of the `yio.md`: listing, `--help`, running a command, and `--cache`. Not for `--version` or `--remove-cache`.
+- For every use of the `yio.md`: listing, `--help`, `--dry-run`, running a command, and `--cache`. Not for `--version` or `--remove-cache`.
 - `pre` before the file is read; `post` after the whole tree is loaded. `post` is not "after the command": it runs before the command does.
 - Each at most once per run.
 - An embedded directory's plugins run when its `yio.md` is embedded, in that directory.
@@ -50,7 +50,7 @@ Choose `.yio` when the plugin only reads files and shows something, because then
 
 | | `.bash` | `.yio` |
 | --- | --- | --- |
-| The built-in flags | `$YIO_HELP`, `$YIO_VERBOSE`, `$YIO_CACHE`, `$YIO_REMOVE_CACHE`, `$YIO_VERSION` | `(env "YIO_HELP")` and so on, as the strings `"true"` and `"false"` |
+| The built-in flags | `$YIO_HELP`, `$YIO_VERBOSE`, `$YIO_CACHE`, `$YIO_REMOVE_CACHE`, `$YIO_DRY_RUN`, `$YIO_VERSION` | `(env "YIO_HELP")` and so on, as the strings `"true"` and `"false"` |
 | The rest of the command line | `"$@"` | `(args)`, a list of strings |
 
 The rest of the command line is every word as typed, without the built-in flags: command names, their arguments, their own flags.
@@ -66,7 +66,7 @@ Plugins run before the commands are known, so the words are not interpreted: a p
 
 In an embedded directory, a plugin is told only what follows the command its `yio.md` is embedded under. With `docs/yio.md` embedded under `## docs`, the plugins of `docs/` see `search file` for both `yio docs search file` from the root and `yio search file` inside `docs/`, and nothing for `yio build`.
 
-Plugins run during `yio --cache` too. One that should not checks `YIO_CACHE` and stops.
+Plugins run during `yio --cache` and `yio COMMAND --dry-run` too. One that should not checks `YIO_CACHE` or `YIO_DRY_RUN` and stops. A plugin that changes files should check `YIO_DRY_RUN`, since a dry run holds back only the command's scripts.
 
 ## A plugin that shows a panel
 

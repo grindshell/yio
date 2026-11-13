@@ -50,6 +50,38 @@ pub fn run(
     Ok(ExitCode::SUCCESS)
 }
 
+/// What `run` would do, written out instead of done, for `--dry-run`: the
+/// variables the scripts would be given, then each script with where it is
+/// from. `title` is the command, such as `yio build`, and `file` the
+/// `yio.md` that defines it. `lines` has the line each script starts on.
+///
+/// What comes out is itself bash, so a script can be read with the values
+/// it would see, or pasted into a shell to step through it.
+pub fn plan(
+    title: &str,
+    file: &str,
+    scripts: &[String],
+    lines: &[usize],
+    vars: &[(&str, String)],
+    list: Option<(&str, &[String])>,
+) -> String {
+    let mut out = format!("# Dry run of `{title}`: nothing below has been run.\n");
+    for (name, value) in vars {
+        out.push_str(&format!("{name}={}\n", quote(value)));
+    }
+    if let Some((name, values)) = list {
+        out.push_str(&array(name, values));
+        out.push('\n');
+    }
+    for (script, line) in scripts.iter().zip(lines) {
+        let idle = if is_idle(script) { ": only comments, so bash is not started" } else { "" };
+        out.push_str(&format!("\n# {file}, line {line}{idle}\n"));
+        out.push_str(script.trim_end_matches('\n'));
+        out.push('\n');
+    }
+    out
+}
+
 /// Whether a script gives bash nothing to do: every line is blank or a
 /// comment. Bash would start, do nothing, and exit with zero, so it is not
 /// started.
@@ -57,7 +89,7 @@ pub fn run(
 /// This is the code block of a command that a plugin answers. The command
 /// needs a block to be runnable, the plugin has already shown the result,
 /// and starting bash would be most of what the command costs.
-fn is_idle(script: &str) -> bool {
+pub fn is_idle(script: &str) -> bool {
     // Bash takes only spaces and tabs as blanks before a `#`.
     script.lines().all(|line| {
         let line = line.trim_start_matches([' ', '\t']);
@@ -70,14 +102,14 @@ fn is_idle(script: &str) -> bool {
 /// A list cannot travel as an environment variable, which holds one string,
 /// so it is written into the script instead. Assigning it also replaces any
 /// variable of that name inherited from the calling shell.
-fn array(name: &str, values: &[String]) -> String {
+pub fn array(name: &str, values: &[String]) -> String {
     let words: Vec<String> = values.iter().map(|value| quote(value)).collect();
     format!("{name}=({})", words.join(" "))
 }
 
 /// `text` as a single-quoted POSIX shell word, which the shell takes
 /// literally whatever it contains.
-fn quote(text: &str) -> String {
+pub fn quote(text: &str) -> String {
     let mut quoted = String::with_capacity(text.len() + 2);
     quoted.push('\'');
     for c in text.chars() {
@@ -263,7 +295,7 @@ mod wsl {
 mod tests {
     use std::process::ExitCode;
 
-    use super::{array, is_idle, quote, run};
+    use super::{array, is_idle, plan, quote, run};
 
     #[test]
     fn a_script_of_only_comments_gives_bash_nothing_to_do() {
@@ -276,6 +308,34 @@ mod tests {
         // Nothing is started for one, so this passes where there is no bash.
         let idle = ["# Answered by a plugin.\n".to_string()];
         assert_eq!(run(&idle, &[], None, None), Ok(ExitCode::SUCCESS));
+    }
+
+    #[test]
+    fn a_plan_shows_the_values_and_each_script() {
+        let scripts = ["set -e\necho \"$TARGET\"\n".to_string(), "# Answered by a plugin.\n".to_string()];
+        let vars = [("TARGET", "it's web".to_string()), ("RELEASE", "false".to_string())];
+        let names = ["a".to_string(), "b c".to_string()];
+        assert_eq!(
+            plan("yio build", "docs/yio.md", &scripts, &[12, 20], &vars, Some(("NAMES", &names))),
+            "\
+# Dry run of `yio build`: nothing below has been run.
+TARGET='it'\\''s web'
+RELEASE='false'
+NAMES=('a' 'b c')
+
+# docs/yio.md, line 12
+set -e
+echo \"$TARGET\"
+
+# docs/yio.md, line 20: only comments, so bash is not started
+# Answered by a plugin.
+"
+        );
+        // A command that takes nothing has no values to show.
+        assert_eq!(
+            plan("yio lint", "yio.md", &["true\n".to_string()], &[5], &[], None),
+            "# Dry run of `yio lint`: nothing below has been run.\n\n# yio.md, line 5\ntrue\n"
+        );
     }
 
     #[test]

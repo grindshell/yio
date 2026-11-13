@@ -25,7 +25,13 @@ pub fn render(path: &[&str], command: &Command, verbose: bool) -> String {
     // the command and naming one of its subcommands are separate forms.
     let mut forms = Vec::new();
     if !command.scripts.is_empty() || command.subcommands.is_empty() {
-        forms.push(with_signature(&prefix, command));
+        // The flags that have to be given are part of how it is run.
+        let mut form = with_signature(&prefix, command);
+        for flag in command.flags.iter().filter(|flag| flag.required) {
+            form.push(' ');
+            form.push_str(&flag.usage());
+        }
+        forms.push(form);
     }
     if !command.subcommands.is_empty() {
         forms.push(format!("{prefix} <command>"));
@@ -95,6 +101,12 @@ fn flag_row(flag: &Flag) -> Row<'_> {
             text.push(' ');
         }
         text.push_str(&format!("[default: {default}]"));
+    }
+    if flag.required {
+        if !text.is_empty() {
+            text.push(' ');
+        }
+        text.push_str("[required]");
     }
     Row { label, text, detail: None }
 }
@@ -181,6 +193,7 @@ Flags:
   -v, --version       Print the yio version
       --cache         Write the interpreted yio.md to .yio/cache.yio
       --remove-cache  Remove .yio/cache.yio
+      --dry-run       Show what a command would run, without running it
 "
         );
     }
@@ -200,6 +213,32 @@ Flags:
             "Usage: yio build (TARGET) [PROFILE] [flags]\n       yio build <command> [flags]\n"
         ));
         assert!(listing.contains("  -j, --jobs <JOBS>   Parallel jobs [default: 4]\n"));
+    }
+
+    #[test]
+    fn required_flags_are_part_of_the_usage() {
+        let source = "## deploy (TARGET)\n**FLAGS**\n- YES\n  - flags: -y --yes\n  - type: boolean\n  - required: true\n  - description: Confirm\n- TAG\n  - flags: -t\n  - required: true\n- NOTE\n  - flags: --note\n```\necho\n```\n### undo\n";
+        let root = markdown::parse(source).unwrap();
+        let listing = render(&["deploy"], &root.subcommands[0], false);
+        // Only where the command is run, not where a subcommand is named.
+        assert!(listing.contains(
+            "Usage: yio deploy (TARGET) --yes -t <TAG> [flags]\n       yio deploy <command> [flags]\n"
+        ));
+        assert!(listing.contains("  -y, --yes           Confirm [required]\n"));
+        assert!(listing.contains("  -t <TAG>            [required]\n"));
+        assert!(listing.contains("      --note <NOTE>\n"));
+        // The list of commands shows arguments only, as before.
+        assert!(render(&[], &root, false).contains("  deploy (TARGET)\n"));
+    }
+
+    #[test]
+    fn examples_in_the_long_help_stay_indented() {
+        let root = markdown::parse("## a\n\n> Short\n\nFor example:\n\n    yio a --fast\n\n```\necho\n```\n").unwrap();
+        let listing = render(&["a"], &root.subcommands[0], true);
+        assert!(listing.starts_with("Short\n\nFor example:\n\n    yio a --fast\n\nUsage: yio a [flags]\n"));
+        // Under a command in a verbose listing, the example is further in.
+        let listing = render(&[], &root, true);
+        assert!(listing.contains("  a  Short\n      For example:\n\n          yio a --fast\n"));
     }
 
     #[test]

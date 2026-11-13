@@ -83,7 +83,7 @@ Set the new version in `Cargo.toml`, commit, then tag that commit `v` plus the v
 - **Positional arguments**: `(MY_ARGUMENT_NAME)` in the heading. Required.
 - **Optional arguments**: `[MY_ARGUMENT_NAME]` in the heading. The script decides whether the variable holds a value.
 - **The rest of the arguments**: `[...MY_LIST_NAME]` as the last argument in the heading takes every argument the others leave, from none to many, so that `yio docs search built-in functions` works. Only for a command with no optional arguments and no subcommands. The script gets a bash array named `MY_LIST_NAME`, not an environment variable.
-- **Named flags**: a paragraph containing `**FLAGS**`, immediately followed (newline optional) by a `-` delimited list. Each top-level item is one flag. Sub-items configure it with the keys `flags`, `type`, `default`, and `description`. Only `flags` is mandatory, the type defaults to string, and flags may have default values (unlike `mask`).
+- **Named flags**: a paragraph containing `**FLAGS**`, immediately followed (newline optional) by a `-` delimited list. Each top-level item is one flag. Sub-items configure it with the keys `flags`, `type`, `default`, `required`, and `description`. Only `flags` is mandatory, the type defaults to string, and flags may have default values (unlike `mask`). A flag with `required: true` has to be given on the command line.
 - **Embedding**: when a relative link to a file named `yio.md` is the only content of a heading's paragraph, that file is loaded in place as part of the same run and its commands nest under the heading. No second `yio` process is spawned. Embedded scripts run in their own file's directory. A link that ends in a heading's anchor (`docs/yio.md#search-terms`) embeds only that command. A file cannot embed itself, in whole or in part, directly or through other files. See `docs/embedding.md`.
 
 Arguments and flags are injected into the script's environment under the name exactly as written. There is no automatic case conversion. Because Windows environment names are case-insensitive, names within one command must be unique ignoring case.
@@ -132,6 +132,7 @@ Present on every command; a `yio.md` may override them.
 | `YIO_VERSION` | `-v --version` | string (semver) |
 | `YIO_CACHE` | `--cache` | boolean |
 | `YIO_REMOVE_CACHE` | `--remove-cache` | boolean |
+| `YIO_DRY_RUN` | `--dry-run` | boolean |
 
 - `YIO_VERSION` is the CLI's own Cargo semver string. `--version` prints it, and it is always injected into scripts.
 - Booleans are the strings `"true"` and `"false"`. The CLI type-checks the values given for them. With a cache, it also warns about scripts that use a boolean in a way that cannot work, such as `[ -n "$FLAG" ]`; the command still runs. See "Boolean checks" in `docs/cli-parsing.md`.
@@ -143,6 +144,7 @@ Present on every command; a `yio.md` may override them.
 - `yio --help` / `-h`: show a formatted description of the given command or subcommand instead of running it. With no command, and with no `yio.md`, it describes the CLI itself.
 - `yio --cache`: write the interpreted result to `.yio/cache.yio`, a cached AST of the commands, subcommands, and options, along with the value of each scripting-language plugin, and exit.
 - `yio --remove-cache`: remove that cache and exit.
+- `yio COMMAND --dry-run`: print the values the command's scripts would be given and each script, without running them. Plugins still run, as they do for `--help`.
 - While the cache file exists, each result in it is used when what it was computed from is unchanged, and recomputed and stored again when it is not. A stale result is never used. A scripting-language plugin with an unchanged result is not run at all; a bash plugin always runs.
 
 ### Cache format

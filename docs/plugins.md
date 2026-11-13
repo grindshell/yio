@@ -24,7 +24,7 @@ They run in order of `NUMBER`, then by file name. `0002_a` and `2_b` have the sa
 
 - A plugin runs at most once per `yio` run.
 - An embedded directory's plugins run when its `yio.md` is embedded: its `pre` plugins just before that file is read.
-- Plugins run for listing, `--help`, running a command, and `--cache`. They do not run when `--version` or `--remove-cache` is on the command line, since neither uses the `yio.md`.
+- Plugins run for listing, `--help`, `--dry-run`, running a command, and `--cache`. They do not run when `--version` or `--remove-cache` is on the command line, since neither uses the `yio.md`.
 - A `pre` plugin may create or rewrite the `yio.md` it sits beside. It runs even when that file does not exist yet.
 - A failing plugin stops the run. The error names the plugin's file.
 - With `--verbose`, each plugin is announced on stderr by name before it runs, and one whose result came from the cache is announced as `from the cache`.
@@ -50,14 +50,14 @@ Two things: the built-in flags, and the rest of the command line.
 
 | | `.bash` | `.yio` |
 | --- | --- | --- |
-| The built-in flags | `$YIO_HELP`, `$YIO_VERBOSE`, `$YIO_CACHE`, `$YIO_REMOVE_CACHE`, `$YIO_VERSION` | `(env "YIO_HELP")` and so on |
+| The built-in flags | `$YIO_HELP`, `$YIO_VERBOSE`, `$YIO_CACHE`, `$YIO_REMOVE_CACHE`, `$YIO_DRY_RUN`, `$YIO_VERSION` | `(env "YIO_HELP")` and so on |
 | The rest of the command line | `"$@"`: `$1`, `$2`, and so on | `(args)`, a list of strings |
 
 ### The built-in flags
 
 Plugins run before the commands are known, so the flags come from the command line as written: a built-in flag counts if its spelling appears anywhere before `--`. This differs from the real parse in one case. If a command defines its own flag with a built-in's spelling, such as its own `--cache`, plugins are still told the built-in was given.
 
-Plugins run during `yio --cache` too. One that should not checks `YIO_CACHE` itself and stops.
+Plugins run during `yio --cache` too. One that should not checks `YIO_CACHE` itself and stops. The same goes for `--dry-run`: only the command's scripts are held back, so a plugin that changes something and should not during a dry run checks `YIO_DRY_RUN`.
 
 ### The rest of the command line
 

@@ -43,7 +43,7 @@ pub fn booleans(command: &Command) -> Vec<Warning> {
 
 /// The variables that hold `true` or `false` in the command's scripts.
 fn boolean_names(command: &Command) -> Vec<&str> {
-    let builtins = [Builtin::Help, Builtin::Verbose, Builtin::Cache, Builtin::RemoveCache];
+    let builtins = [Builtin::Help, Builtin::Verbose, Builtin::Cache, Builtin::RemoveCache, Builtin::DryRun];
     // A command may reuse a built-in's name for something of its own.
     let own = |name: &str| {
         command.params.iter().any(|param| param.name == name)
